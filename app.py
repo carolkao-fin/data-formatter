@@ -3,7 +3,7 @@
 import io
 import json
 import os
-import re
+import zipfile
 from datetime import datetime
 
 from groq import Groq
@@ -13,11 +13,9 @@ import streamlit as st
 HISTORY_FILE = "format_history.json"
 MODEL = "llama-3.3-70b-versatile"
 
-# ── Page config ────────────────────────────────────────────────────────────────
-
 st.set_page_config(page_title="AI 資料格式整理", page_icon="📊", layout="wide")
 
-# ── Helpers: persistence ───────────────────────────────────────────────────────
+# ── persistence ───────────────────────────────────────────────────────────────
 
 def load_history() -> list:
     if os.path.exists(HISTORY_FILE):
@@ -38,7 +36,7 @@ def append_log(entry: dict) -> None:
         history.insert(0, entry)
         save_history(history)
 
-# ── Helpers: API client ────────────────────────────────────────────────────────
+# ── API client ────────────────────────────────────────────────────────────────
 
 def _api_key_from_env() -> str | None:
     try:
@@ -51,7 +49,7 @@ def _api_key_from_env() -> str | None:
 def _make_client(key: str) -> Groq:
     return Groq(api_key=key)
 
-# ── Helpers: file reading ──────────────────────────────────────────────────────
+# ── file reading ──────────────────────────────────────────────────────────────
 
 def read_raw_file(uploaded) -> pd.DataFrame | None:
     uploaded.seek(0)
@@ -65,6 +63,22 @@ def read_raw_file(uploaded) -> pd.DataFrame | None:
     except Exception as e:
         st.error(f"讀取失敗：{e}")
     return None
+
+def merge_raw_files(uploaded_files) -> tuple[pd.DataFrame | None, list[str]]:
+    """合併多個原始資料檔案為一個 DataFrame，回傳 (merged_df, file_name_list)"""
+    dfs, names = [], []
+    for f in uploaded_files:
+        df = read_raw_file(f)
+        if df is not None:
+            dfs.append(df)
+            names.append(f.name)
+    if not dfs:
+        return None, []
+    try:
+        return pd.concat(dfs, ignore_index=True), names
+    except Exception as e:
+        st.error(f"合併失敗：{e}")
+        return None, names
 
 def read_target_file(uploaded) -> dict | None:
     """
@@ -116,7 +130,7 @@ def read_target_file(uploaded) -> dict | None:
     st.error("目標格式請上傳 CSV、Excel (.xlsx) 或 Word (.docx)")
     return None
 
-# ── Helpers: describe structure ────────────────────────────────────────────────
+# ── describe structure ────────────────────────────────────────────────────────
 
 def describe_raw_df(df: pd.DataFrame, n_sample: int = 5) -> str:
     lines = []
@@ -144,7 +158,6 @@ def describe_target(target: dict) -> str:
                 lines.append(f"  {col!r} — 範例: {series.head(3).tolist()}")
         return "\n".join(lines)
 
-    # word
     lines = ["格式類型：Word (.docx)"]
     for i, tbl in enumerate(target.get("tables", [])):
         headers = tbl[0] if tbl else []
@@ -183,9 +196,7 @@ def _strip_json(text: str) -> str:
     return text
 
 
-def get_mapping(client: Groq,
-                raw_df: pd.DataFrame,
-                target: dict) -> dict:
+def get_mapping(client: Groq, raw_df: pd.DataFrame, target: dict) -> dict:
     raw_desc = describe_raw_df(raw_df)
     raw_sample = raw_df.head(5).to_string(index=False)
     tgt_desc = describe_target(target)
@@ -229,7 +240,7 @@ def get_mapping(client: Groq,
     text = _strip_json(resp.choices[0].message.content)
     return json.loads(text)
 
-# ── Apply mapping → DataFrame ──────────────────────────────────────────────────
+# ── Apply mapping ──────────────────────────────────────────────────────────────
 
 def _safe_str(v) -> str:
     if pd.isna(v):
@@ -301,11 +312,6 @@ def generate_excel(result_df: pd.DataFrame) -> bytes:
 def generate_word(result_df: pd.DataFrame,
                   target: dict,
                   mapping: dict) -> bytes:
-    """
-    Fills a Word table template with result_df.
-    If the target Word has a table → clone template, replace data rows.
-    If no table → create a simple table.
-    """
     from docx import Document
     from docx.oxml.ns import qn
     import copy
@@ -315,20 +321,17 @@ def generate_word(result_df: pd.DataFrame,
 
     if doc.tables:
         table = doc.tables[0]
-        # Keep only the header row; remove all data rows
         header_cells = [cell.text.strip() for cell in table.rows[0].cells]
         while len(table.rows) > 1:
             tbl_elem = table._tbl
             tbl_elem.remove(table.rows[-1]._tr)
 
-        # Add data rows
         for _, row_data in result_df.iterrows():
             new_tr = copy.deepcopy(table.rows[0]._tr)
             new_row_cells = new_tr.findall(qn("w:tc"))
             for j, header in enumerate(header_cells):
                 if j < len(new_row_cells):
                     tc = new_row_cells[j]
-                    # Clear all paragraphs then set text
                     for p in tc.findall(qn("w:p")):
                         tc.remove(p)
                     from docx.oxml import OxmlElement
@@ -342,7 +345,6 @@ def generate_word(result_df: pd.DataFrame,
                     tc.append(p_elem)
             table._tbl.append(new_tr)
     else:
-        # No table in template — add one
         table = doc.add_table(rows=1, cols=len(result_df.columns))
         table.style = "Table Grid"
         for j, col in enumerate(result_df.columns):
@@ -357,9 +359,122 @@ def generate_word(result_df: pd.DataFrame,
     doc.save(buf)
     return buf.getvalue()
 
-# ── UI ─────────────────────────────────────────────────────────────────────────
+def generate_zip(results: list) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in results:
+            zf.writestr(item["filename"], item["data"])
+    return buf.getvalue()
 
-# Sidebar
+# ── Shared processing logic ────────────────────────────────────────────────────
+
+def run_conversion(client: Groq,
+                   raw_df: pd.DataFrame,
+                   target: dict,
+                   raw_name: str = "") -> dict:
+    """
+    執行一次完整的 AI 分析與轉換，回傳 dict 包含所有結果。
+    可能 raise 例外（json.JSONDecodeError 或其他 API 錯誤）。
+    """
+    mapping = get_mapping(client, raw_df, target)
+
+    target_type = target["type"]
+    if target_type == "excel":
+        target_cols = list(target["df"].columns)
+    else:
+        tables = target.get("tables", [])
+        target_cols = tables[0][0] if tables and tables[0] else []
+
+    result_df = apply_mapping_to_df(raw_df, target_cols, mapping)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = raw_name.rsplit(".", 1)[0] if raw_name else "result"
+
+    if target_type == "word":
+        try:
+            out_bytes = generate_word(result_df, target, mapping)
+            out_name = f"{prefix}_{ts}.docx"
+            mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        except Exception:
+            out_bytes = generate_excel(result_df)
+            out_name = f"{prefix}_{ts}.xlsx"
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        out_bytes = generate_excel(result_df)
+        out_name = f"{prefix}_{ts}.xlsx"
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    matched = sum(
+        1 for m in mapping.get("mappings", [])
+        if any(s in raw_df.columns for s in m.get("source_cols", []))
+    )
+
+    return {
+        "result_df": result_df,
+        "mapping": mapping,
+        "out_bytes": out_bytes,
+        "out_name": out_name,
+        "mime": mime,
+        "matched": matched,
+        "target_cols": target_cols,
+        "target_type": target_type,
+    }
+
+# ── Mapping display helper ─────────────────────────────────────────────────────
+
+_LABELS = {
+    "direct": "直接複製",
+    "merge": "合併欄位",
+    "value_map": "值對應轉換",
+    "date_format": "日期格式轉換",
+    "number_fmt": "數字格式化",
+    "empty": "無對應（空白）",
+}
+
+def show_mapping_table(mapping: dict, raw_df: pd.DataFrame, target_cols: list) -> None:
+    map_rows, matched, unmatched = [], 0, 0
+    for m in mapping.get("mappings", []):
+        sources = [s for s in m.get("source_cols", []) if s in raw_df.columns]
+        transform = m.get("transform", "direct")
+        if sources:
+            matched += 1
+            src_str = " + ".join(sources)
+        else:
+            unmatched += 1
+            src_str = "⚠️ 無對應"
+        extra = ""
+        if transform == "value_map" and m.get("value_map"):
+            extra = f"  {m['value_map']}"
+        elif transform == "date_format" and m.get("target_fmt"):
+            extra = f"  → {m['target_fmt']}"
+        elif transform == "merge" and m.get("join_sep") not in (None, " ", ""):
+            extra = f"  分隔符：{m['join_sep']!r}"
+        map_rows.append({
+            "目標欄位": m.get("target_col", ""),
+            "來源欄位": src_str,
+            "轉換方式": _LABELS.get(transform, transform) + extra,
+            "備註": m.get("note") or "",
+        })
+
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("目標欄位總數", len(target_cols))
+    mc2.metric("成功映射", matched)
+    mc3.metric("無對應來源", unmatched)
+
+    st.dataframe(
+        pd.DataFrame(map_rows),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "目標欄位": st.column_config.TextColumn(width="small"),
+            "來源欄位": st.column_config.TextColumn(width="medium"),
+            "轉換方式": st.column_config.TextColumn(width="medium"),
+            "備註":     st.column_config.TextColumn(width="large"),
+        },
+    )
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+
 with st.sidebar:
     st.markdown("## ⚙️ 設定")
     st.divider()
@@ -383,17 +498,19 @@ with st.sidebar:
     st.markdown("### 📖 使用說明")
     st.markdown("""
 **① 上傳原始資料**
-你手上的原始 Excel 或 CSV 檔案，不需要預先整理。
+支援上傳**多個** Excel / CSV，系統會自動合併成一份再整理。
 
 **② 上傳目標格式**
 你希望整理成的格式範例：
 - Excel / CSV → 輸出 Excel
 - Word (.docx) → 輸出 Word
 
-目標格式檔可以只有欄位標題，也可以附帶幾筆示範資料，Claude 會自動判斷結構。
-
 **③ 點擊「開始整理」**
-Claude 分析結構、映射欄位、轉換資料，完成後即可下載。
+AI 分析結構、映射欄位、轉換資料，完成後即可下載。
+
+---
+
+**📦 批次整理**：設定多組「原始資料＋格式」，一次處理後打包成 ZIP 下載。
     """)
 
     st.divider()
@@ -408,42 +525,59 @@ Claude 分析結構、映射欄位、轉換資料，完成後即可下載。
     st.caption("原始資料支援：CSV、xlsx、xls")
     st.caption("目標格式支援：CSV、xlsx、docx")
 
-# Main
+# ── Main ───────────────────────────────────────────────────────────────────────
+
 st.title("📊 AI 資料格式整理工具")
-st.caption("上傳原始資料 + 你想要的格式範例，Claude AI 自動判斷結構、映射欄位並輸出整理後的檔案")
+st.caption("上傳原始資料 + 你想要的格式範例，AI 自動判斷結構、映射欄位並輸出整理後的檔案")
 
-tab_main, tab_history = st.tabs(["📁 資料整理", "📋 操作歷史"])
+tab_main, tab_batch, tab_history = st.tabs(["📁 單一整理", "📦 批次整理", "📋 操作歷史"])
 
-# ── Tab: 資料整理 ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Tab 1: 單一整理（支援多個原始資料自動合併）
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_main:
     col_l, col_r = st.columns(2, gap="large")
 
     with col_l:
         st.subheader("① 原始資料")
-        st.caption("上傳你手上的原始 Excel / CSV，不需要預先整理")
-        raw_file = st.file_uploader(
+        st.caption("可同時選取多個 Excel / CSV，系統自動合併（欄位相同效果最佳）")
+        raw_files = st.file_uploader(
             "拖曳或點擊上傳原始資料",
             type=["csv", "xlsx", "xls"],
             key="raw_upload",
             label_visibility="collapsed",
+            accept_multiple_files=True,
         )
-        if raw_file:
-            raw_df = read_raw_file(raw_file)
+
+        raw_df = None
+        if raw_files:
+            if len(raw_files) == 1:
+                raw_df = read_raw_file(raw_files[0])
+                if raw_df is not None:
+                    st.success(f"**{raw_files[0].name}** — {len(raw_df):,} 筆 × {len(raw_df.columns)} 欄")
+            else:
+                raw_df, merged_names = merge_raw_files(raw_files)
+                if raw_df is not None:
+                    st.success(f"已合併 {len(merged_names)} 個檔案 → **{len(raw_df):,} 筆 × {len(raw_df.columns)} 欄**")
+                    with st.expander(f"合併的檔案清單（{len(merged_names)} 個）"):
+                        for n in merged_names:
+                            st.write(f"• {n}")
             if raw_df is not None:
-                st.success(f"**{raw_file.name}** — {len(raw_df):,} 筆 × {len(raw_df.columns)} 欄")
                 st.dataframe(raw_df.head(5), use_container_width=True, height=200)
                 with st.expander("所有欄位名稱"):
                     st.write(list(raw_df.columns))
 
     with col_r:
         st.subheader("② 想整理成的格式（上傳範例）")
-        st.caption("上傳目標格式範例。副檔名決定輸出格式：`.xlsx` → Excel，`.docx` → Word")
+        st.caption("副檔名決定輸出格式：`.xlsx` → Excel，`.docx` → Word")
         tmpl_file = st.file_uploader(
             "拖曳或點擊上傳目標格式",
             type=["csv", "xlsx", "docx"],
             key="tmpl_upload",
             label_visibility="collapsed",
         )
+
+        target = None
         if tmpl_file:
             target = read_target_file(tmpl_file)
             if target is not None:
@@ -468,10 +602,9 @@ with tab_main:
                                 use_container_width=True, height=180,
                             )
 
-    # Process button
     st.divider()
-    ready = (raw_file is not None) and (tmpl_file is not None)
-    can_run = ready and bool(api_key)
+    ready = bool(raw_files) and (tmpl_file is not None)
+    can_run = ready and bool(api_key) and (raw_df is not None) and (target is not None)
 
     if not api_key:
         st.warning("⚠️ 請先在左側輸入 Groq API Key（免費申請：console.groq.com）")
@@ -483,16 +616,11 @@ with tab_main:
         disabled=(not can_run),
         key="run_btn",
     ):
-        raw_df = read_raw_file(raw_file)
-        target = read_target_file(tmpl_file)
-        if raw_df is None or target is None:
-            st.stop()
-
         client = _make_client(api_key)
 
-        with st.spinner("Claude 分析目標格式結構並規劃轉換方式中…"):
+        with st.spinner("AI 分析目標格式結構並規劃轉換方式中…"):
             try:
-                mapping = get_mapping(client, raw_df, target)
+                res = run_conversion(client, raw_df, target, tmpl_file.name)
             except json.JSONDecodeError as e:
                 st.error(f"AI 回傳格式錯誤，請再試一次。（{e}）")
                 st.stop()
@@ -500,126 +628,247 @@ with tab_main:
                 st.error(f"AI 分析失敗：{e}")
                 st.stop()
 
-        # Structure analysis
-        analysis = mapping.get("structure_analysis")
+        analysis = res["mapping"].get("structure_analysis")
         if analysis:
-            st.info(f"**Claude 的結構理解：** {analysis}")
+            st.info(f"**AI 的結構理解：** {analysis}")
 
-        # Build result DataFrame
-        target_type = target["type"]
-        if target_type == "excel":
-            target_cols = list(target["df"].columns)
-        else:
-            # Use headers from first Word table
-            tables = target.get("tables", [])
-            target_cols = tables[0][0] if tables and tables[0] else []
-
-        result_df = apply_mapping_to_df(raw_df, target_cols, mapping)
-
-        # Mapping table
         st.subheader("轉換計畫")
-        _LABELS = {
-            "direct": "直接複製",
-            "merge": "合併欄位",
-            "value_map": "值對應轉換",
-            "date_format": "日期格式轉換",
-            "number_fmt": "數字格式化",
-            "empty": "無對應（空白）",
-        }
-        map_rows, matched, unmatched = [], 0, 0
-        for m in mapping.get("mappings", []):
-            sources = [s for s in m.get("source_cols", []) if s in raw_df.columns]
-            transform = m.get("transform", "direct")
-            if sources:
-                matched += 1
-                src_str = " + ".join(sources)
-            else:
-                unmatched += 1
-                src_str = "⚠️ 無對應"
-            extra = ""
-            if transform == "value_map" and m.get("value_map"):
-                extra = f"  {m['value_map']}"
-            elif transform == "date_format" and m.get("target_fmt"):
-                extra = f"  → {m['target_fmt']}"
-            elif transform == "merge" and m.get("join_sep") not in (None, " ", ""):
-                extra = f"  分隔符：{m['join_sep']!r}"
-            map_rows.append({
-                "目標欄位": m.get("target_col", ""),
-                "來源欄位": src_str,
-                "轉換方式": _LABELS.get(transform, transform) + extra,
-                "備註": m.get("note") or "",
-            })
+        show_mapping_table(res["mapping"], raw_df, res["target_cols"])
 
-        mc1, mc2, mc3 = st.columns(3)
-        mc1.metric("目標欄位總數", len(target_cols))
-        mc2.metric("成功映射", matched)
-        mc3.metric("無對應來源", unmatched)
-
-        st.dataframe(
-            pd.DataFrame(map_rows),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "目標欄位": st.column_config.TextColumn(width="small"),
-                "來源欄位": st.column_config.TextColumn(width="medium"),
-                "轉換方式": st.column_config.TextColumn(width="medium"),
-                "備註":     st.column_config.TextColumn(width="large"),
-            },
-        )
-
-        # Preview
         st.subheader("整理結果預覽")
-        st.dataframe(result_df.head(10), use_container_width=True)
-        st.caption(f"共 {len(result_df):,} 筆")
-
-        # Generate output
-        now = datetime.now()
-        ts = now.strftime("%Y%m%d_%H%M%S")
-
-        if target_type == "word":
-            try:
-                out_bytes = generate_word(result_df, target, mapping)
-                out_name = f"result_{ts}.docx"
-                mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            except Exception as e:
-                st.warning(f"Word 輸出失敗，改為 Excel 格式：{e}")
-                out_bytes = generate_excel(result_df)
-                out_name = f"result_{ts}.xlsx"
-                mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        else:
-            out_bytes = generate_excel(result_df)
-            out_name = f"result_{ts}.xlsx"
-            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        st.dataframe(res["result_df"].head(10), use_container_width=True)
+        st.caption(f"共 {len(res['result_df']):,} 筆")
 
         st.download_button(
-            f"⬇️ 下載整理後的{'Word' if target_type == 'word' else 'Excel'}",
-            data=out_bytes,
-            file_name=out_name,
-            mime=mime,
+            f"⬇️ 下載整理後的{'Word' if res['target_type'] == 'word' else 'Excel'}",
+            data=res["out_bytes"],
+            file_name=res["out_name"],
+            mime=res["mime"],
             use_container_width=True,
             type="primary",
         )
 
-        # Save history
+        now = datetime.now()
+        raw_names_str = ", ".join(f.name for f in raw_files)
         entry = {
             "ts":            now.strftime("%Y-%m-%d %H:%M:%S"),
             "date":          now.strftime("%Y-%m-%d"),
             "time":          now.strftime("%H:%M:%S"),
-            "raw_file":      raw_file.name,
+            "raw_file":      raw_names_str,
             "template_file": tmpl_file.name,
-            "output_file":   out_name,
-            "output_type":   target_type,
+            "output_file":   res["out_name"],
+            "output_type":   res["target_type"],
             "rows":          len(raw_df),
-            "mapped":        matched,
-            "total_cols":    len(target_cols),
+            "mapped":        res["matched"],
+            "total_cols":    len(res["target_cols"]),
         }
         append_log(entry)
-        st.success(f"✅ 完成！處理 {len(raw_df):,} 筆，映射 {matched}/{len(target_cols)} 個欄位")
+        st.success(f"✅ 完成！處理 {len(raw_df):,} 筆，映射 {res['matched']}/{len(res['target_cols'])} 個欄位")
 
-    if not ready and not (raw_file is None and tmpl_file is None):
-        st.info("👆 兩個檔案都上傳後，「開始整理」按鈕就會啟用")
+    if bool(raw_files) and tmpl_file is None:
+        st.info("👆 請上傳目標格式，「開始整理」按鈕就會啟用")
+    elif not raw_files and tmpl_file is not None:
+        st.info("👆 請上傳原始資料，「開始整理」按鈕就會啟用")
 
-# ── Tab: 操作歷史 ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Tab 2: 批次整理（多組 原始資料 + 目標格式）
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_batch:
+    st.subheader("批次整理模式")
+    st.caption("每組設定一份「原始資料（可多檔合併）」＋「目標格式」，一次處理多組，打包成 ZIP 下載")
+
+    if "batch_group_ids" not in st.session_state:
+        st.session_state.batch_group_ids = [0]
+    if "batch_next_id" not in st.session_state:
+        st.session_state.batch_next_id = 1
+
+    st.write("")
+
+    # ── render each group ──────────────────────────────────────────────────────
+    for gid in list(st.session_state.batch_group_ids):
+        group_idx = st.session_state.batch_group_ids.index(gid) + 1
+        with st.expander(f"📂 群組 {group_idx}", expanded=True):
+            bc1, bc2, bc_del = st.columns([5, 5, 1])
+
+            with bc1:
+                st.markdown("**原始資料**（可選多個，自動合併）")
+                st.file_uploader(
+                    "上傳原始資料",
+                    type=["csv", "xlsx", "xls"],
+                    key=f"batch_raw_{gid}",
+                    label_visibility="collapsed",
+                    accept_multiple_files=True,
+                )
+                b_raws = st.session_state.get(f"batch_raw_{gid}") or []
+                if b_raws:
+                    names_str = "、".join(f.name for f in b_raws)
+                    st.caption(f"✅ {len(b_raws)} 個檔案：{names_str}")
+
+            with bc2:
+                st.markdown("**目標格式**")
+                st.file_uploader(
+                    "上傳目標格式",
+                    type=["csv", "xlsx", "docx"],
+                    key=f"batch_tmpl_{gid}",
+                    label_visibility="collapsed",
+                )
+                b_tmpl = st.session_state.get(f"batch_tmpl_{gid}")
+                if b_tmpl:
+                    st.caption(f"✅ {b_tmpl.name}")
+
+            with bc_del:
+                st.write("")
+                st.write("")
+                if len(st.session_state.batch_group_ids) > 1:
+                    if st.button("❌", key=f"del_{gid}", help="移除此群組"):
+                        st.session_state.batch_group_ids.remove(gid)
+                        st.rerun()
+
+    # ── add group button ───────────────────────────────────────────────────────
+    if st.button("➕ 新增群組", use_container_width=False):
+        new_id = st.session_state.batch_next_id
+        st.session_state.batch_group_ids.append(new_id)
+        st.session_state.batch_next_id += 1
+        st.rerun()
+
+    st.divider()
+
+    # ── readiness check ────────────────────────────────────────────────────────
+    batch_ready_ids = [
+        gid for gid in st.session_state.batch_group_ids
+        if (st.session_state.get(f"batch_raw_{gid}") or [])
+        and st.session_state.get(f"batch_tmpl_{gid}")
+    ]
+    n_total = len(st.session_state.batch_group_ids)
+    n_ready = len(batch_ready_ids)
+
+    if n_ready > 0:
+        st.info(f"已就緒 **{n_ready}/{n_total}** 組，點擊下方按鈕開始批次處理")
+    else:
+        st.info("請為每組上傳原始資料與目標格式")
+
+    if not api_key:
+        st.warning("⚠️ 請先在左側輸入 Groq API Key")
+
+    if st.button(
+        f"🚀 開始批次整理（{n_ready} 組）",
+        type="primary",
+        use_container_width=True,
+        disabled=(n_ready == 0 or not api_key),
+        key="batch_run_btn",
+    ):
+        client = _make_client(api_key)
+        batch_results = []
+        now = datetime.now()
+        ts = now.strftime("%Y%m%d_%H%M%S")
+
+        progress = st.progress(0, text="準備中…")
+
+        for i, gid in enumerate(batch_ready_ids):
+            group_label = f"群組 {st.session_state.batch_group_ids.index(gid) + 1}"
+            progress.progress(i / n_ready, text=f"處理 {group_label}（{i+1}/{n_ready}）…")
+
+            b_raws = st.session_state.get(f"batch_raw_{gid}") or []
+            b_tmpl = st.session_state.get(f"batch_tmpl_{gid}")
+
+            with st.container(border=True):
+                st.markdown(f"**⚙️ {group_label}**")
+                try:
+                    # 讀取並合併原始資料
+                    if len(b_raws) == 1:
+                        g_raw_df = read_raw_file(b_raws[0])
+                        g_raw_name = b_raws[0].name
+                    else:
+                        g_raw_df, g_merged_names = merge_raw_files(b_raws)
+                        g_raw_name = f"merged_group{gid}"
+
+                    if g_raw_df is None:
+                        st.error("原始資料讀取失敗，跳過此群組")
+                        continue
+
+                    # 讀取目標格式
+                    g_target = read_target_file(b_tmpl)
+                    if g_target is None:
+                        st.error("目標格式讀取失敗，跳過此群組")
+                        continue
+
+                    # AI 分析與轉換
+                    with st.spinner(f"AI 分析 {group_label}…"):
+                        res = run_conversion(client, g_raw_df, g_target, g_raw_name)
+
+                    analysis = res["mapping"].get("structure_analysis")
+                    if analysis:
+                        st.info(f"AI 結構理解：{analysis}")
+
+                    col_stat1, col_stat2 = st.columns(2)
+                    col_stat1.metric("處理筆數", f"{len(res['result_df']):,}")
+                    col_stat2.metric("映射欄位", f"{res['matched']}/{len(res['target_cols'])}")
+
+                    st.dataframe(res["result_df"].head(5), use_container_width=True, height=160)
+
+                    batch_results.append({
+                        "filename": res["out_name"],
+                        "data": res["out_bytes"],
+                    })
+
+                    log_entry = {
+                        "ts":            now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "date":          now.strftime("%Y-%m-%d"),
+                        "time":          now.strftime("%H:%M:%S"),
+                        "raw_file":      ", ".join(f.name for f in b_raws),
+                        "template_file": b_tmpl.name,
+                        "output_file":   res["out_name"],
+                        "output_type":   res["target_type"],
+                        "rows":          len(g_raw_df),
+                        "mapped":        res["matched"],
+                        "total_cols":    len(res["target_cols"]),
+                    }
+                    append_log(log_entry)
+                    st.success(f"✅ 完成")
+
+                except json.JSONDecodeError as e:
+                    st.error(f"AI 回傳格式錯誤：{e}")
+                except Exception as e:
+                    st.error(f"處理失敗：{e}")
+
+        progress.progress(1.0, text="全部完成！")
+
+        # ── download ───────────────────────────────────────────────────────────
+        if batch_results:
+            st.divider()
+            if len(batch_results) == 1:
+                item = batch_results[0]
+                ext = item["filename"].rsplit(".", 1)[-1]
+                mime = (
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    if ext == "docx"
+                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                st.download_button(
+                    f"⬇️ 下載結果（{item['filename']}）",
+                    data=item["data"],
+                    file_name=item["filename"],
+                    mime=mime,
+                    use_container_width=True,
+                    type="primary",
+                )
+            else:
+                zip_bytes = generate_zip(batch_results)
+                st.download_button(
+                    f"⬇️ 下載全部結果（ZIP，{len(batch_results)} 個檔案）",
+                    data=zip_bytes,
+                    file_name=f"batch_results_{ts}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                    type="primary",
+                )
+            st.success(f"✅ 批次完成！成功處理 {len(batch_results)}/{n_ready} 組")
+        else:
+            st.error("所有群組均處理失敗")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Tab 3: 操作歷史
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_history:
     st.subheader("操作歷史記錄")
     history = load_history()
@@ -646,7 +895,12 @@ with tab_history:
             "mapped":        "映射欄位",
             "total_cols":    "目標欄位數",
         })
-        display_cols = [c for c in ["日期","時間","原始檔案","格式模板","輸出檔名","輸出格式","資料筆數","映射欄位","目標欄位數"] if c in hist_df.columns]
+        display_cols = [
+            c for c in [
+                "日期","時間","原始檔案","格式模板",
+                "輸出檔名","輸出格式","資料筆數","映射欄位","目標欄位數",
+            ] if c in hist_df.columns
+        ]
         st.dataframe(hist_df[display_cols], use_container_width=True, hide_index=True)
 
         col_dl, col_clr, _ = st.columns([2, 2, 4])
