@@ -373,34 +373,35 @@ def generate_zip(results: list) -> bytes:
 def run_conversion(client: Groq,
                    raw_df: pd.DataFrame,
                    target: dict,
-                   raw_name: str = "") -> dict:
+                   raw_name: str = "",
+                   force_table_idx: int | None = None) -> dict:
     """
     執行一次完整的 AI 分析與轉換，回傳 dict 包含所有結果。
-    可能 raise 例外（json.JSONDecodeError 或其他 API 錯誤）。
+    force_table_idx：指定 Word 文件中要填入資料的表格索引（0-based）；
+                     None 表示由 AI mapping 自動比對。
     """
-    mapping = get_mapping(client, raw_df, target)
-
     target_type = target["type"]
     target_table_idx = 0
+
     if target_type == "excel":
         target_cols = list(target["df"].columns)
     else:
         tables = target.get("tables", [])
         if tables:
-            # 用 AI 映射的目標欄位，比對 Word 文件中哪個表格的欄位最吻合
-            ai_target_cols = {m.get("target_col") for m in mapping.get("mappings", [])}
-            best_idx, best_match = 0, -1
-            for i, tbl in enumerate(tables):
-                if not tbl or not tbl[0]:
-                    continue
-                headers = set(str(h) for h in tbl[0])
-                match = len(ai_target_cols & headers)
-                if match > best_match:
-                    best_match, best_idx = match, i
-            target_table_idx = best_idx
-            target_cols = list(tables[best_idx][0])
+            if force_table_idx is not None:
+                # 使用者明確指定表格
+                idx = min(force_table_idx, len(tables) - 1)
+                target_table_idx = idx
+                target_cols = list(tables[idx][0]) if tables[idx] else []
+            else:
+                # fallback：選欄位最多的表格
+                idx = max(range(len(tables)), key=lambda i: len(tables[i][0]) if tables[i] else 0)
+                target_table_idx = idx
+                target_cols = list(tables[idx][0])
         else:
             target_cols = []
+
+    mapping = get_mapping(client, raw_df, target)
 
     result_df = apply_mapping_to_df(raw_df, target_cols, mapping)
 
@@ -608,16 +609,38 @@ with tab_main:
                     tables = target.get("tables", [])
                     paras = target.get("paragraphs", [])
                     st.success(f"**{tmpl_file.name}** (Word) — {len(tables)} 個表格，{len(paras)} 個段落")
-                    if tables:
-                        headers = tables[0][0] if tables[0] else []
-                        st.caption(f"表格欄位：{headers}")
-                        preview_rows = tables[0][:5]
-                        if preview_rows:
-                            st.dataframe(
-                                pd.DataFrame(preview_rows[1:], columns=preview_rows[0]) if len(preview_rows) > 1
-                                else pd.DataFrame(columns=preview_rows[0]),
-                                use_container_width=True, height=180,
-                            )
+
+    # Word 表格選擇器（移至欄外，跨全寬）
+    single_word_table_idx = None
+    if target is not None and target["type"] == "word":
+        w_tables = target.get("tables", [])
+        if w_tables:
+            def _table_label(i, tbl):
+                headers = tbl[0] if tbl else []
+                cols_preview = " | ".join(str(h) for h in headers[:6])
+                if len(headers) > 6:
+                    cols_preview += " | …"
+                return f"表格 {i+1}（{len(headers)} 欄）：{cols_preview}"
+
+            options = [_table_label(i, tbl) for i, tbl in enumerate(w_tables)]
+            sel = st.selectbox(
+                "🎯 選擇要填入資料的表格",
+                options=options,
+                key="single_word_table_sel",
+                help="Word 文件含多個表格時，請選擇要寫入資料的目標表格",
+            )
+            single_word_table_idx = options.index(sel)
+
+            # 預覽選取的表格
+            chosen = w_tables[single_word_table_idx]
+            if chosen:
+                preview_rows = chosen[:6]
+                st.dataframe(
+                    pd.DataFrame(preview_rows[1:], columns=preview_rows[0]) if len(preview_rows) > 1
+                    else pd.DataFrame(columns=preview_rows[0]),
+                    use_container_width=True,
+                    height=180,
+                )
 
     st.divider()
 
@@ -648,7 +671,7 @@ with tab_main:
 
         with st.spinner("AI 分析目標格式結構並規劃轉換方式中…"):
             try:
-                res = run_conversion(client, raw_df, target, raw_base)
+                res = run_conversion(client, raw_df, target, raw_base, force_table_idx=single_word_table_idx)
             except json.JSONDecodeError as e:
                 st.error(f"AI 回傳格式錯誤，請再試一次。（{e}）")
                 st.stop()
@@ -758,6 +781,28 @@ with tab_batch:
                         st.session_state.batch_group_ids.remove(gid)
                         st.rerun()
 
+            # Word 表格選擇器（上傳 docx 後才顯示）
+            if b_tmpl and b_tmpl.name.lower().endswith(".docx"):
+                try:
+                    _bt = read_target_file(b_tmpl)
+                    _w_tables = _bt.get("tables", []) if _bt else []
+                    if _w_tables:
+                        def _blabel(i, tbl):
+                            h = tbl[0] if tbl else []
+                            prev = " | ".join(str(x) for x in h[:6])
+                            if len(h) > 6:
+                                prev += " | …"
+                            return f"表格 {i+1}（{len(h)} 欄）：{prev}"
+                        _opts = [_blabel(i, t) for i, t in enumerate(_w_tables)]
+                        st.selectbox(
+                            "🎯 選擇要填入資料的表格",
+                            options=_opts,
+                            key=f"batch_word_tbl_{gid}",
+                            help="請選擇要寫入資料的目標表格",
+                        )
+                except Exception:
+                    pass
+
             # 自訂輸出檔名（每組各自設定）
             st.text_input(
                 "輸出檔案名稱（選填，不含副檔名）",
@@ -834,9 +879,19 @@ with tab_batch:
                         st.error("目標格式讀取失敗，跳過此群組")
                         continue
 
+                    # 取得使用者選的表格索引（Word 才有）
+                    g_force_tbl = None
+                    if g_target["type"] == "word":
+                        sel_label = st.session_state.get(f"batch_word_tbl_{gid}")
+                        if sel_label:
+                            try:
+                                g_force_tbl = int(sel_label.split("（")[0].replace("表格", "").strip()) - 1
+                            except Exception:
+                                g_force_tbl = None
+
                     # AI 分析與轉換
                     with st.spinner(f"AI 分析 {group_label}…"):
-                        res = run_conversion(client, g_raw_df, g_target, g_raw_name)
+                        res = run_conversion(client, g_raw_df, g_target, g_raw_name, force_table_idx=g_force_tbl)
 
                     analysis = res["mapping"].get("structure_analysis")
                     if analysis:
