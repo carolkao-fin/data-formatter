@@ -311,7 +311,8 @@ def generate_excel(result_df: pd.DataFrame) -> bytes:
 
 def generate_word(result_df: pd.DataFrame,
                   target: dict,
-                  mapping: dict) -> bytes:
+                  mapping: dict,
+                  target_table_idx: int = 0) -> bytes:
     from docx import Document
     from docx.oxml.ns import qn
     import copy
@@ -320,7 +321,8 @@ def generate_word(result_df: pd.DataFrame,
     doc = Document(io.BytesIO(raw_bytes)) if raw_bytes else Document()
 
     if doc.tables:
-        table = doc.tables[0]
+        idx = min(target_table_idx, len(doc.tables) - 1)
+        table = doc.tables[idx]
         header_cells = [cell.text.strip() for cell in table.rows[0].cells]
         while len(table.rows) > 1:
             tbl_elem = table._tbl
@@ -379,11 +381,26 @@ def run_conversion(client: Groq,
     mapping = get_mapping(client, raw_df, target)
 
     target_type = target["type"]
+    target_table_idx = 0
     if target_type == "excel":
         target_cols = list(target["df"].columns)
     else:
         tables = target.get("tables", [])
-        target_cols = tables[0][0] if tables and tables[0] else []
+        if tables:
+            # 用 AI 映射的目標欄位，比對 Word 文件中哪個表格的欄位最吻合
+            ai_target_cols = {m.get("target_col") for m in mapping.get("mappings", [])}
+            best_idx, best_match = 0, -1
+            for i, tbl in enumerate(tables):
+                if not tbl or not tbl[0]:
+                    continue
+                headers = set(str(h) for h in tbl[0])
+                match = len(ai_target_cols & headers)
+                if match > best_match:
+                    best_match, best_idx = match, i
+            target_table_idx = best_idx
+            target_cols = list(tables[best_idx][0])
+        else:
+            target_cols = []
 
     result_df = apply_mapping_to_df(raw_df, target_cols, mapping)
 
@@ -392,7 +409,7 @@ def run_conversion(client: Groq,
 
     if target_type == "word":
         try:
-            out_bytes = generate_word(result_df, target, mapping)
+            out_bytes = generate_word(result_df, target, mapping, target_table_idx)
             out_name = f"{prefix}_{ts}.docx"
             mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         except Exception:
@@ -603,6 +620,14 @@ with tab_main:
                             )
 
     st.divider()
+
+    # 自訂輸出檔名
+    single_custom_name = st.text_input(
+        "輸出檔案名稱（選填，不含副檔名）",
+        placeholder="預設使用原始資料檔名",
+        key="single_output_name",
+    )
+
     ready = bool(raw_files) and (tmpl_file is not None)
     can_run = ready and bool(api_key) and (raw_df is not None) and (target is not None)
 
@@ -618,15 +643,24 @@ with tab_main:
     ):
         client = _make_client(api_key)
 
+        # 原始資料檔名（多檔時用 merged）
+        raw_base = raw_files[0].name if len(raw_files) == 1 else "merged"
+
         with st.spinner("AI 分析目標格式結構並規劃轉換方式中…"):
             try:
-                res = run_conversion(client, raw_df, target, tmpl_file.name)
+                res = run_conversion(client, raw_df, target, raw_base)
             except json.JSONDecodeError as e:
                 st.error(f"AI 回傳格式錯誤，請再試一次。（{e}）")
                 st.stop()
             except Exception as e:
                 st.error(f"AI 分析失敗：{e}")
                 st.stop()
+
+        # 套用自訂檔名
+        if single_custom_name.strip():
+            ext = res["out_name"].rsplit(".", 1)[-1]
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            res["out_name"] = f"{single_custom_name.strip()}_{ts}.{ext}"
 
         analysis = res["mapping"].get("structure_analysis")
         if analysis:
@@ -640,7 +674,7 @@ with tab_main:
         st.caption(f"共 {len(res['result_df']):,} 筆")
 
         st.download_button(
-            f"⬇️ 下載整理後的{'Word' if res['target_type'] == 'word' else 'Excel'}",
+            f"⬇️ 下載整理後的{'Word' if res['target_type'] == 'word' else 'Excel'}（{res['out_name']}）",
             data=res["out_bytes"],
             file_name=res["out_name"],
             mime=res["mime"],
@@ -724,6 +758,14 @@ with tab_batch:
                         st.session_state.batch_group_ids.remove(gid)
                         st.rerun()
 
+            # 自訂輸出檔名（每組各自設定）
+            st.text_input(
+                "輸出檔案名稱（選填，不含副檔名）",
+                placeholder="預設使用原始資料檔名",
+                key=f"batch_outname_{gid}",
+                label_visibility="visible",
+            )
+
     # ── add group button ───────────────────────────────────────────────────────
     if st.button("➕ 新增群組", use_container_width=False):
         new_id = st.session_state.batch_next_id
@@ -800,11 +842,19 @@ with tab_batch:
                     if analysis:
                         st.info(f"AI 結構理解：{analysis}")
 
+                    # 套用自訂檔名
+                    batch_custom_name = (st.session_state.get(f"batch_outname_{gid}") or "").strip()
+                    if batch_custom_name:
+                        ext = res["out_name"].rsplit(".", 1)[-1]
+                        batch_ts = now.strftime("%Y%m%d_%H%M%S")
+                        res["out_name"] = f"{batch_custom_name}_{batch_ts}.{ext}"
+
                     col_stat1, col_stat2 = st.columns(2)
                     col_stat1.metric("處理筆數", f"{len(res['result_df']):,}")
                     col_stat2.metric("映射欄位", f"{res['matched']}/{len(res['target_cols'])}")
 
                     st.dataframe(res["result_df"].head(5), use_container_width=True, height=160)
+                    st.caption(f"輸出檔名：{res['out_name']}")
 
                     batch_results.append({
                         "filename": res["out_name"],
