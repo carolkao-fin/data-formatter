@@ -113,16 +113,37 @@ def read_target_file(uploaded) -> dict | None:
     if name.endswith(".docx"):
         try:
             from docx import Document
+            from docx.oxml.ns import qn as _qn
             doc = Document(io.BytesIO(raw_bytes))
-            tables, paragraphs = [], []
-            for tbl in doc.tables:
-                rows = [[cell.text.strip() for cell in row.cells] for row in tbl.rows]
-                tables.append(rows)
-            for para in doc.paragraphs:
-                t = para.text.strip()
-                if t:
-                    paragraphs.append({"style": para.style.name, "text": t[:200]})
-            return {"type": "word", "tables": tables, "paragraphs": paragraphs, "raw_bytes": raw_bytes}
+
+            # 逐一掃描 body 子元素，取每個表格前最近的段落文字作為表格標題
+            tables, paragraphs, table_titles = [], [], []
+            last_para_text = ""
+            for child in doc.element.body:
+                tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                if tag == "p":
+                    text = "".join(n.text or "" for n in child.iter() if n.tag.split("}")[-1] == "t").strip()
+                    if text:
+                        last_para_text = text
+                        paragraphs.append({"style": tag, "text": text[:200]})
+                elif tag == "tbl":
+                    rows = []
+                    for tr in child.findall(_qn("w:tr")):
+                        row = [
+                            "".join(t.text or "" for t in tc.iter(_qn("w:t"))).strip()
+                            for tc in tr.findall(_qn("w:tc"))
+                        ]
+                        rows.append(row)
+                    tables.append(rows)
+                    table_titles.append(last_para_text)
+
+            return {
+                "type": "word",
+                "tables": tables,
+                "paragraphs": paragraphs,
+                "table_titles": table_titles,
+                "raw_bytes": raw_bytes,
+            }
         except Exception as e:
             st.error(f"讀取 Word 失敗：{e}")
             return None
@@ -617,40 +638,50 @@ with tab_main:
                     paras = target.get("paragraphs", [])
                     st.success(f"**{tmpl_file.name}** (Word) — {len(tables)} 個表格，{len(paras)} 個段落")
 
-    # Word 表格選擇器（複選，移至欄外跨全寬）
-    single_word_table_idxs = None
-    if target is not None and target["type"] == "word":
+    # Word 表格選擇器（每個原始資料各自選擇，複選）
+    word_options = []   # 供 button handler 取用
+    if target is not None and target["type"] == "word" and raw_files:
         w_tables = target.get("tables", [])
+        w_titles = target.get("table_titles", [])
+
         if w_tables:
-            def _table_label(i, tbl):
+            def _table_label(i, tbl, title=""):
                 headers = tbl[0] if tbl else []
-                cols_preview = " | ".join(str(h) for h in headers[:6])
-                if len(headers) > 6:
+                cols_preview = " | ".join(str(h) for h in headers[:5])
+                if len(headers) > 5:
                     cols_preview += " | …"
-                return f"表格 {i+1}（{len(headers)} 欄）：{cols_preview}"
+                name = title.strip() if title.strip() else f"表格 {i+1}"
+                return f"{name}（{len(headers)} 欄）：{cols_preview}"
 
-            options = [_table_label(i, tbl) for i, tbl in enumerate(w_tables)]
-            sel_list = st.multiselect(
-                "🎯 選擇要填入資料的表格（可複選）",
-                options=options,
-                key="single_word_table_sel",
-                help="可同時選多個結構相同的表格，AI 以第一個選取的表格欄位做映射，所有選取的表格都會填入相同資料",
-            )
+            word_options = [
+                _table_label(i, tbl, w_titles[i] if i < len(w_titles) else "")
+                for i, tbl in enumerate(w_tables)
+            ]
 
-            if sel_list:
-                single_word_table_idxs = [options.index(s) for s in sel_list]
-                # 預覽第一個選取的表格
-                chosen = w_tables[single_word_table_idxs[0]]
-                if chosen:
-                    preview_rows = chosen[:6]
-                    st.dataframe(
-                        pd.DataFrame(preview_rows[1:], columns=preview_rows[0]) if len(preview_rows) > 1
-                        else pd.DataFrame(columns=preview_rows[0]),
-                        use_container_width=True,
-                        height=180,
-                    )
-                if len(single_word_table_idxs) > 1:
-                    st.caption(f"共選取 {len(single_word_table_idxs)} 個表格，AI 映射以「{sel_list[0]}」的欄位為準")
+            st.markdown("### ③ 設定每個原始資料要填入的表格")
+            for fi, rf in enumerate(raw_files):
+                with st.container(border=True):
+                    c_name, c_sel = st.columns([2, 5])
+                    with c_name:
+                        st.markdown(f"**{rf.name}**")
+                    with c_sel:
+                        st.multiselect(
+                            "填入表格",
+                            options=word_options,
+                            key=f"single_file_tables_{fi}",
+                            label_visibility="collapsed",
+                            help="可複選；AI 以第一個選取的表格欄位做映射",
+                        )
+                        sel_preview = st.session_state.get(f"single_file_tables_{fi}") or []
+                        if sel_preview:
+                            first_idx = word_options.index(sel_preview[0])
+                            chosen = w_tables[first_idx]
+                            if chosen and len(chosen) > 1:
+                                st.dataframe(
+                                    pd.DataFrame(chosen[1:4], columns=chosen[0]),
+                                    use_container_width=True,
+                                    height=130,
+                                )
 
     st.divider()
 
@@ -662,7 +693,7 @@ with tab_main:
     )
 
     ready = bool(raw_files) and (tmpl_file is not None)
-    can_run = ready and bool(api_key) and (raw_df is not None) and (target is not None)
+    can_run = ready and bool(api_key) and (target is not None)
 
     if not api_key:
         st.warning("⚠️ 請先在左側輸入 Groq API Key（免費申請：console.groq.com）")
@@ -675,62 +706,161 @@ with tab_main:
         key="run_btn",
     ):
         client = _make_client(api_key)
-
-        # 原始資料檔名（多檔時用 merged）
-        raw_base = raw_files[0].name if len(raw_files) == 1 else "merged"
-
-        with st.spinner("AI 分析目標格式結構並規劃轉換方式中…"):
-            try:
-                res = run_conversion(client, raw_df, target, raw_base, force_table_idxs=single_word_table_idxs)
-            except json.JSONDecodeError as e:
-                st.error(f"AI 回傳格式錯誤，請再試一次。（{e}）")
-                st.stop()
-            except Exception as e:
-                st.error(f"AI 分析失敗：{e}")
-                st.stop()
-
-        # 套用自訂檔名
-        if single_custom_name.strip():
-            ext = res["out_name"].rsplit(".", 1)[-1]
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            res["out_name"] = f"{single_custom_name.strip()}_{ts}.{ext}"
-
-        analysis = res["mapping"].get("structure_analysis")
-        if analysis:
-            st.info(f"**AI 的結構理解：** {analysis}")
-
-        st.subheader("轉換計畫")
-        show_mapping_table(res["mapping"], raw_df, res["target_cols"])
-
-        st.subheader("整理結果預覽")
-        st.dataframe(res["result_df"].head(10), use_container_width=True)
-        st.caption(f"共 {len(res['result_df']):,} 筆")
-
-        st.download_button(
-            f"⬇️ 下載整理後的{'Word' if res['target_type'] == 'word' else 'Excel'}（{res['out_name']}）",
-            data=res["out_bytes"],
-            file_name=res["out_name"],
-            mime=res["mime"],
-            use_container_width=True,
-            type="primary",
-        )
-
         now = datetime.now()
+        ts = now.strftime("%Y%m%d_%H%M%S")
         raw_names_str = ", ".join(f.name for f in raw_files)
-        entry = {
-            "ts":            now.strftime("%Y-%m-%d %H:%M:%S"),
-            "date":          now.strftime("%Y-%m-%d"),
-            "time":          now.strftime("%H:%M:%S"),
-            "raw_file":      raw_names_str,
-            "template_file": tmpl_file.name,
-            "output_file":   res["out_name"],
-            "output_type":   res["target_type"],
-            "rows":          len(raw_df),
-            "mapped":        res["matched"],
-            "total_cols":    len(res["target_cols"]),
-        }
-        append_log(entry)
-        st.success(f"✅ 完成！處理 {len(raw_df):,} 筆，映射 {res['matched']}/{len(res['target_cols'])} 個欄位")
+
+        # ── Word 多原始資料：每個檔案分別 AI 分析，填入各自選取的表格 ──────────
+        if target["type"] == "word" and len(raw_files) >= 1 and word_options:
+            from docx import Document as _DocX
+            doc_obj = _DocX(io.BytesIO(target["raw_bytes"]))
+            w_tables_rt = target.get("tables", [])
+            all_matched_info = []
+            total_rows_processed = 0
+
+            for fi, rf in enumerate(raw_files):
+                sel_labels = st.session_state.get(f"single_file_tables_{fi}") or []
+                if not sel_labels:
+                    st.warning(f"⚠️ {rf.name} 未選取表格，跳過")
+                    continue
+
+                tbl_idxs = [word_options.index(s) for s in sel_labels]
+                g_raw_df = read_raw_file(rf)
+                if g_raw_df is None:
+                    continue
+
+                # 以第一個選取表格的欄位為基準做 AI 映射
+                first_tbl_headers = [
+                    c.text.strip() for c in doc_obj.tables[tbl_idxs[0]].rows[0].cells
+                ] if tbl_idxs[0] < len(doc_obj.tables) else []
+
+                focused_target = {
+                    "type": "excel",
+                    "df": pd.DataFrame(columns=first_tbl_headers),
+                    "raw_bytes": b"",
+                }
+
+                with st.spinner(f"AI 分析 {rf.name}…"):
+                    try:
+                        mapping = get_mapping(client, g_raw_df, focused_target)
+                    except json.JSONDecodeError as e:
+                        st.error(f"{rf.name}：AI 回傳格式錯誤（{e}），跳過")
+                        continue
+                    except Exception as e:
+                        st.error(f"{rf.name}：AI 分析失敗（{e}），跳過")
+                        continue
+
+                result_df = apply_mapping_to_df(g_raw_df, first_tbl_headers, mapping)
+
+                for idx in tbl_idxs:
+                    if idx < len(doc_obj.tables):
+                        _fill_word_table(doc_obj.tables[idx], result_df)
+
+                matched = sum(
+                    1 for m in mapping.get("mappings", [])
+                    if any(s in g_raw_df.columns for s in m.get("source_cols", []))
+                )
+                total_rows_processed += len(g_raw_df)
+                all_matched_info.append({
+                    "file": rf.name, "mapping": mapping,
+                    "result_df": result_df, "target_cols": first_tbl_headers,
+                    "matched": matched, "tbl_idxs": tbl_idxs,
+                })
+
+                analysis = mapping.get("structure_analysis")
+                if analysis:
+                    st.info(f"**{rf.name}** AI 理解：{analysis}")
+                with st.expander(f"📋 {rf.name} 轉換計畫"):
+                    show_mapping_table(mapping, g_raw_df, first_tbl_headers)
+                st.caption(f"**{rf.name}** → 填入表格 {[i+1 for i in tbl_idxs]}，{len(result_df):,} 筆")
+
+            if not all_matched_info:
+                st.error("所有原始資料均未處理（請確認已為每個檔案選取填入表格）")
+                st.stop()
+
+            buf = io.BytesIO()
+            doc_obj.save(buf)
+            out_bytes = buf.getvalue()
+            out_name_base = single_custom_name.strip() or raw_files[0].name.rsplit(".", 1)[0]
+            out_name = f"{out_name_base}_{ts}.docx"
+            mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+            st.download_button(
+                f"⬇️ 下載整理後的 Word（{out_name}）",
+                data=out_bytes, file_name=out_name, mime=mime,
+                use_container_width=True, type="primary",
+            )
+            for info in all_matched_info:
+                append_log({
+                    "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "date": now.strftime("%Y-%m-%d"),
+                    "time": now.strftime("%H:%M:%S"),
+                    "raw_file": info["file"],
+                    "template_file": tmpl_file.name,
+                    "output_file": out_name,
+                    "output_type": "word",
+                    "rows": len(info["result_df"]),
+                    "mapped": info["matched"],
+                    "total_cols": len(info["target_cols"]),
+                })
+            st.success(f"✅ 完成！共 {len(all_matched_info)} 個檔案，合計 {total_rows_processed:,} 筆")
+
+        # ── Excel 或單純 Word 無選擇器：合併所有檔案後一次處理 ────────────────
+        else:
+            if len(raw_files) == 1:
+                single_raw_df = read_raw_file(raw_files[0])
+                raw_base = raw_files[0].name
+            else:
+                single_raw_df, _ = merge_raw_files(raw_files)
+                raw_base = "merged"
+
+            if single_raw_df is None:
+                st.error("原始資料讀取失敗")
+                st.stop()
+
+            with st.spinner("AI 分析目標格式結構並規劃轉換方式中…"):
+                try:
+                    res = run_conversion(client, single_raw_df, target, raw_base)
+                except json.JSONDecodeError as e:
+                    st.error(f"AI 回傳格式錯誤，請再試一次。（{e}）")
+                    st.stop()
+                except Exception as e:
+                    st.error(f"AI 分析失敗：{e}")
+                    st.stop()
+
+            if single_custom_name.strip():
+                ext = res["out_name"].rsplit(".", 1)[-1]
+                res["out_name"] = f"{single_custom_name.strip()}_{ts}.{ext}"
+
+            analysis = res["mapping"].get("structure_analysis")
+            if analysis:
+                st.info(f"**AI 的結構理解：** {analysis}")
+
+            st.subheader("轉換計畫")
+            show_mapping_table(res["mapping"], single_raw_df, res["target_cols"])
+
+            st.subheader("整理結果預覽")
+            st.dataframe(res["result_df"].head(10), use_container_width=True)
+            st.caption(f"共 {len(res['result_df']):,} 筆")
+
+            st.download_button(
+                f"⬇️ 下載整理後的{'Word' if res['target_type'] == 'word' else 'Excel'}（{res['out_name']}）",
+                data=res["out_bytes"], file_name=res["out_name"], mime=res["mime"],
+                use_container_width=True, type="primary",
+            )
+            append_log({
+                "ts":            now.strftime("%Y-%m-%d %H:%M:%S"),
+                "date":          now.strftime("%Y-%m-%d"),
+                "time":          now.strftime("%H:%M:%S"),
+                "raw_file":      raw_names_str,
+                "template_file": tmpl_file.name,
+                "output_file":   res["out_name"],
+                "output_type":   res["target_type"],
+                "rows":          len(single_raw_df),
+                "mapped":        res["matched"],
+                "total_cols":    len(res["target_cols"]),
+            })
+            st.success(f"✅ 完成！處理 {len(single_raw_df):,} 筆，映射 {res['matched']}/{len(res['target_cols'])} 個欄位")
 
     if bool(raw_files) and tmpl_file is None:
         st.info("👆 請上傳目標格式，「開始整理」按鈕就會啟用")
