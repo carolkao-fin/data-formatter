@@ -474,7 +474,7 @@ with tab_main:
     can_run = ready and bool(api_key)
 
     if not api_key:
-        st.warning("⚠️ 請先在左側輸入 Anthropic API Key")
+        st.warning("⚠️ 請先在左側輸入 Groq API Key（免費申請：console.groq.com）")
 
     if st.button(
         "🚀 開始整理",
