@@ -309,43 +309,49 @@ def generate_excel(result_df: pd.DataFrame) -> bytes:
         result_df.to_excel(writer, index=False, sheet_name="整理結果")
     return buf.getvalue()
 
+def _fill_word_table(table, result_df: pd.DataFrame) -> None:
+    """將 result_df 的資料列填入 Word table（清除舊資料列後重新寫入）"""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    import copy
+
+    header_cells = [cell.text.strip() for cell in table.rows[0].cells]
+    while len(table.rows) > 1:
+        table._tbl.remove(table.rows[-1]._tr)
+
+    for _, row_data in result_df.iterrows():
+        new_tr = copy.deepcopy(table.rows[0]._tr)
+        new_row_cells = new_tr.findall(qn("w:tc"))
+        for j, header in enumerate(header_cells):
+            if j < len(new_row_cells):
+                tc = new_row_cells[j]
+                for p in tc.findall(qn("w:p")):
+                    tc.remove(p)
+                p_elem = OxmlElement("w:p")
+                r_elem = OxmlElement("w:r")
+                t_elem = OxmlElement("w:t")
+                val = row_data.get(header, "")
+                t_elem.text = "" if pd.isna(val) else str(val)
+                r_elem.append(t_elem)
+                p_elem.append(r_elem)
+                tc.append(p_elem)
+        table._tbl.append(new_tr)
+
+
 def generate_word(result_df: pd.DataFrame,
                   target: dict,
                   mapping: dict,
-                  target_table_idx: int = 0) -> bytes:
+                  target_table_idxs: list[int] | None = None) -> bytes:
     from docx import Document
-    from docx.oxml.ns import qn
-    import copy
 
     raw_bytes = target.get("raw_bytes", b"")
     doc = Document(io.BytesIO(raw_bytes)) if raw_bytes else Document()
 
     if doc.tables:
-        idx = min(target_table_idx, len(doc.tables) - 1)
-        table = doc.tables[idx]
-        header_cells = [cell.text.strip() for cell in table.rows[0].cells]
-        while len(table.rows) > 1:
-            tbl_elem = table._tbl
-            tbl_elem.remove(table.rows[-1]._tr)
-
-        for _, row_data in result_df.iterrows():
-            new_tr = copy.deepcopy(table.rows[0]._tr)
-            new_row_cells = new_tr.findall(qn("w:tc"))
-            for j, header in enumerate(header_cells):
-                if j < len(new_row_cells):
-                    tc = new_row_cells[j]
-                    for p in tc.findall(qn("w:p")):
-                        tc.remove(p)
-                    from docx.oxml import OxmlElement
-                    p_elem = OxmlElement("w:p")
-                    r_elem = OxmlElement("w:r")
-                    t_elem = OxmlElement("w:t")
-                    val = row_data.get(header, "")
-                    t_elem.text = "" if pd.isna(val) else str(val)
-                    r_elem.append(t_elem)
-                    p_elem.append(r_elem)
-                    tc.append(p_elem)
-            table._tbl.append(new_tr)
+        idxs = target_table_idxs if target_table_idxs else [0]
+        for idx in idxs:
+            idx = min(idx, len(doc.tables) - 1)
+            _fill_word_table(doc.tables[idx], result_df)
     else:
         table = doc.add_table(rows=1, cols=len(result_df.columns))
         table.style = "Table Grid"
@@ -374,29 +380,30 @@ def run_conversion(client: Groq,
                    raw_df: pd.DataFrame,
                    target: dict,
                    raw_name: str = "",
-                   force_table_idx: int | None = None) -> dict:
+                   force_table_idxs: list[int] | None = None) -> dict:
     """
     執行一次完整的 AI 分析與轉換，回傳 dict 包含所有結果。
-    force_table_idx：指定 Word 文件中要填入資料的表格索引（0-based）；
-                     None 表示由 AI mapping 自動比對。
+    force_table_idxs：指定要填入資料的表格索引清單（0-based）；
+                      以第一個索引的欄位做 AI 映射，所有指定表格都會填入相同資料。
+                      None 或空 list 則 fallback 為欄位最多的表格。
     """
     target_type = target["type"]
-    target_table_idx = 0
+    target_table_idxs: list[int] = []
 
     if target_type == "excel":
         target_cols = list(target["df"].columns)
     else:
         tables = target.get("tables", [])
         if tables:
-            if force_table_idx is not None:
-                # 使用者明確指定表格
-                idx = min(force_table_idx, len(tables) - 1)
-                target_table_idx = idx
-                target_cols = list(tables[idx][0]) if tables[idx] else []
+            if force_table_idxs:
+                # 使用者明確選取（可能多個）
+                target_table_idxs = [min(i, len(tables) - 1) for i in force_table_idxs]
+                first = target_table_idxs[0]
+                target_cols = list(tables[first][0]) if tables[first] else []
             else:
-                # fallback：選欄位最多的表格
+                # fallback：欄位最多的表格
                 idx = max(range(len(tables)), key=lambda i: len(tables[i][0]) if tables[i] else 0)
-                target_table_idx = idx
+                target_table_idxs = [idx]
                 target_cols = list(tables[idx][0])
         else:
             target_cols = []
@@ -410,7 +417,7 @@ def run_conversion(client: Groq,
 
     if target_type == "word":
         try:
-            out_bytes = generate_word(result_df, target, mapping, target_table_idx)
+            out_bytes = generate_word(result_df, target, mapping, target_table_idxs)
             out_name = f"{prefix}_{ts}.docx"
             mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         except Exception:
@@ -610,8 +617,8 @@ with tab_main:
                     paras = target.get("paragraphs", [])
                     st.success(f"**{tmpl_file.name}** (Word) — {len(tables)} 個表格，{len(paras)} 個段落")
 
-    # Word 表格選擇器（移至欄外，跨全寬）
-    single_word_table_idx = None
+    # Word 表格選擇器（複選，移至欄外跨全寬）
+    single_word_table_idxs = None
     if target is not None and target["type"] == "word":
         w_tables = target.get("tables", [])
         if w_tables:
@@ -623,24 +630,27 @@ with tab_main:
                 return f"表格 {i+1}（{len(headers)} 欄）：{cols_preview}"
 
             options = [_table_label(i, tbl) for i, tbl in enumerate(w_tables)]
-            sel = st.selectbox(
-                "🎯 選擇要填入資料的表格",
+            sel_list = st.multiselect(
+                "🎯 選擇要填入資料的表格（可複選）",
                 options=options,
                 key="single_word_table_sel",
-                help="Word 文件含多個表格時，請選擇要寫入資料的目標表格",
+                help="可同時選多個結構相同的表格，AI 以第一個選取的表格欄位做映射，所有選取的表格都會填入相同資料",
             )
-            single_word_table_idx = options.index(sel)
 
-            # 預覽選取的表格
-            chosen = w_tables[single_word_table_idx]
-            if chosen:
-                preview_rows = chosen[:6]
-                st.dataframe(
-                    pd.DataFrame(preview_rows[1:], columns=preview_rows[0]) if len(preview_rows) > 1
-                    else pd.DataFrame(columns=preview_rows[0]),
-                    use_container_width=True,
-                    height=180,
-                )
+            if sel_list:
+                single_word_table_idxs = [options.index(s) for s in sel_list]
+                # 預覽第一個選取的表格
+                chosen = w_tables[single_word_table_idxs[0]]
+                if chosen:
+                    preview_rows = chosen[:6]
+                    st.dataframe(
+                        pd.DataFrame(preview_rows[1:], columns=preview_rows[0]) if len(preview_rows) > 1
+                        else pd.DataFrame(columns=preview_rows[0]),
+                        use_container_width=True,
+                        height=180,
+                    )
+                if len(single_word_table_idxs) > 1:
+                    st.caption(f"共選取 {len(single_word_table_idxs)} 個表格，AI 映射以「{sel_list[0]}」的欄位為準")
 
     st.divider()
 
@@ -671,7 +681,7 @@ with tab_main:
 
         with st.spinner("AI 分析目標格式結構並規劃轉換方式中…"):
             try:
-                res = run_conversion(client, raw_df, target, raw_base, force_table_idx=single_word_table_idx)
+                res = run_conversion(client, raw_df, target, raw_base, force_table_idxs=single_word_table_idxs)
             except json.JSONDecodeError as e:
                 st.error(f"AI 回傳格式錯誤，請再試一次。（{e}）")
                 st.stop()
@@ -781,7 +791,7 @@ with tab_batch:
                         st.session_state.batch_group_ids.remove(gid)
                         st.rerun()
 
-            # Word 表格選擇器（上傳 docx 後才顯示）
+            # Word 表格選擇器（上傳 docx 後才顯示，複選）
             if b_tmpl and b_tmpl.name.lower().endswith(".docx"):
                 try:
                     _bt = read_target_file(b_tmpl)
@@ -794,11 +804,11 @@ with tab_batch:
                                 prev += " | …"
                             return f"表格 {i+1}（{len(h)} 欄）：{prev}"
                         _opts = [_blabel(i, t) for i, t in enumerate(_w_tables)]
-                        st.selectbox(
-                            "🎯 選擇要填入資料的表格",
+                        st.multiselect(
+                            "🎯 選擇要填入資料的表格（可複選）",
                             options=_opts,
                             key=f"batch_word_tbl_{gid}",
-                            help="請選擇要寫入資料的目標表格",
+                            help="可同時選多個結構相同的表格，AI 以第一個選取的欄位做映射",
                         )
                 except Exception:
                     pass
@@ -879,19 +889,25 @@ with tab_batch:
                         st.error("目標格式讀取失敗，跳過此群組")
                         continue
 
-                    # 取得使用者選的表格索引（Word 才有）
-                    g_force_tbl = None
+                    # 取得使用者選的表格索引清單（Word 才有，複選）
+                    g_force_tbls = None
                     if g_target["type"] == "word":
-                        sel_label = st.session_state.get(f"batch_word_tbl_{gid}")
-                        if sel_label:
-                            try:
-                                g_force_tbl = int(sel_label.split("（")[0].replace("表格", "").strip()) - 1
-                            except Exception:
-                                g_force_tbl = None
+                        sel_labels = st.session_state.get(f"batch_word_tbl_{gid}") or []
+                        if sel_labels:
+                            g_force_tbls = []
+                            for sl in sel_labels:
+                                try:
+                                    g_force_tbls.append(
+                                        int(sl.split("（")[0].replace("表格", "").strip()) - 1
+                                    )
+                                except Exception:
+                                    pass
+                            if not g_force_tbls:
+                                g_force_tbls = None
 
                     # AI 分析與轉換
                     with st.spinner(f"AI 分析 {group_label}…"):
-                        res = run_conversion(client, g_raw_df, g_target, g_raw_name, force_table_idx=g_force_tbl)
+                        res = run_conversion(client, g_raw_df, g_target, g_raw_name, force_table_idxs=g_force_tbls)
 
                     analysis = res["mapping"].get("structure_analysis")
                     if analysis:
