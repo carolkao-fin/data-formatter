@@ -1,4 +1,4 @@
-"""AI 資料格式整理工具 — 上傳原始資料與目標格式，Claude AI 自動判斷結構並轉換"""
+"""AI 資料格式整理工具 — 上傳原始資料與目標格式，Groq Llama 自動判斷結構並轉換"""
 
 import io
 import json
@@ -6,12 +6,12 @@ import os
 import re
 from datetime import datetime
 
-import anthropic
+from groq import Groq
 import pandas as pd
 import streamlit as st
 
 HISTORY_FILE = "format_history.json"
-MODEL = "claude-sonnet-4-6"
+MODEL = "llama-3.3-70b-versatile"
 
 # ── Page config ────────────────────────────────────────────────────────────────
 
@@ -42,14 +42,14 @@ def append_log(entry: dict) -> None:
 
 def _api_key_from_env() -> str | None:
     try:
-        return st.secrets.get("ANTHROPIC_API_KEY")
+        return st.secrets.get("GROQ_API_KEY")
     except Exception:
         pass
-    return os.environ.get("ANTHROPIC_API_KEY")
+    return os.environ.get("GROQ_API_KEY")
 
 @st.cache_resource
-def _make_client(key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=key)
+def _make_client(key: str) -> Groq:
+    return Groq(api_key=key)
 
 # ── Helpers: file reading ──────────────────────────────────────────────────────
 
@@ -172,24 +172,31 @@ _SYSTEM_PROMPT = """你是資料結構分析與轉換專家。任務：
 對每一個目標欄位都要有一筆 mapping（source_cols 無對應則填空陣列）。"""
 
 
-def get_mapping(client: anthropic.Anthropic,
+def _strip_json(text: str) -> str:
+    text = text.strip()
+    if "```" in text:
+        parts = text.split("```")
+        for i, part in enumerate(parts):
+            if i % 2 == 1:
+                text = part.lstrip("json").strip()
+                break
+    return text
+
+
+def get_mapping(client: Groq,
                 raw_df: pd.DataFrame,
                 target: dict) -> dict:
     raw_desc = describe_raw_df(raw_df)
     raw_sample = raw_df.head(5).to_string(index=False)
     tgt_desc = describe_target(target)
 
-    resp = client.messages.create(
+    resp = client.chat.completions.create(
         model=MODEL,
         max_tokens=4096,
-        system=[{
-            "type": "text",
-            "text": _SYSTEM_PROMPT,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[{
-            "role": "user",
-            "content": f"""=== 原始資料 ===
+        temperature=0.2,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": f"""=== 原始資料 ===
 欄位結構：
 {raw_desc}
 
@@ -215,17 +222,11 @@ def get_mapping(client: anthropic.Anthropic,
       "note": "說明或 null"
     }}
   ]
-}}""",
-        }],
+}}"""},
+        ],
     )
 
-    text = resp.content[0].text.strip()
-    if "```" in text:
-        parts = text.split("```")
-        for i, part in enumerate(parts):
-            if i % 2 == 1:
-                text = part.lstrip("json").strip()
-                break
+    text = _strip_json(resp.choices[0].message.content)
     return json.loads(text)
 
 # ── Apply mapping → DataFrame ──────────────────────────────────────────────────
@@ -366,16 +367,17 @@ with st.sidebar:
     env_key = _api_key_from_env()
     if env_key:
         api_key = env_key
-        st.success("✅ API Key 已從環境載入")
+        st.success("✅ Groq Key 已從環境載入")
     else:
         api_key = st.text_input(
-            "Anthropic API Key",
+            "Groq API Key（免費）",
             type="password",
-            placeholder="sk-ant-...",
-            help="前往 console.anthropic.com 取得",
+            placeholder="gsk_...",
+            help="免費申請：console.groq.com，用 Google 帳號即可",
         )
         if api_key:
-            st.success("✅ API Key 已輸入")
+            st.success("✅ Groq Key 已輸入")
+    st.caption("📌 [免費取得 Groq Key](https://console.groq.com)")
 
     st.divider()
     st.markdown("### 📖 使用說明")
@@ -402,7 +404,7 @@ Claude 分析結構、映射欄位、轉換資料，完成後即可下載。
         st.caption(f"最近：{last.get('date','')} {last.get('time','')}")
 
     st.divider()
-    st.caption(f"模型：{MODEL}")
+    st.caption(f"模型：{MODEL}（Groq 免費）")
     st.caption("原始資料支援：CSV、xlsx、xls")
     st.caption("目標格式支援：CSV、xlsx、docx")
 
