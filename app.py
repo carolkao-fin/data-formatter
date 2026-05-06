@@ -450,14 +450,14 @@ def generate_excel(result_df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 def _fmt_val(val) -> str:
-    """格式化輸出值：整數不顯示 .0，小數最多保留 4 位並去掉尾零。"""
+    """格式化輸出值：整數不顯示 .0，小數保留原始精度。"""
     if pd.isna(val):
         return ""
     try:
         f = float(val)
         if f == int(f) and abs(f) < 1e15:
             return str(int(f))
-        return f"{f:.4f}".rstrip("0").rstrip(".")
+        return str(f)
     except (ValueError, TypeError, OverflowError):
         return str(val)
 
