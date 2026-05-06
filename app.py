@@ -232,6 +232,28 @@ def _strip_country(s: str) -> str:
     return (m.group(1) + m.group(2)) if m else s
 
 
+def _infer_country(df: pd.DataFrame) -> str | None:
+    """從 raw_df 欄位名稱推斷國家（取第一個符合『年{country}自』模式的欄位）。"""
+    import re
+    for col in df.columns:
+        m = re.match(r'^.+?年(.+?)自.+$', str(col))
+        if m:
+            country = m.group(1).strip()
+            if country:
+                return country
+    return None
+
+
+def _replace_country_in_cols(cols: list[str], new_country: str) -> list[str]:
+    """將欄位名稱中 『年{country}自』 的國家部分替換為 new_country。"""
+    import re
+    result = []
+    for col in cols:
+        m = re.match(r'^(.+?年)(.+?)(自.+)$', col)
+        result.append(m.group(1) + new_country + m.group(3) if m else col)
+    return result
+
+
 def _filter_raw_by_keywords(raw_df: pd.DataFrame, target_cols: list[str]) -> pd.DataFrame:
     """
     Filter raw_df to only columns whose names share at least one keyword
@@ -1062,6 +1084,17 @@ with tab_main:
 
                 result_df = apply_mapping_to_df(g_raw_df, first_tbl_headers, mapping)
 
+                # 若原始資料國家與目標欄位國家不同，自動替換欄位名稱與 Word 標題列
+                _raw_country = _infer_country(g_raw_df)
+                if _raw_country:
+                    result_df.columns = _replace_country_in_cols(list(result_df.columns), _raw_country)
+                    if i < len(doc_obj.tables):
+                        import re as _re
+                        for _cell in doc_obj.tables[i].rows[0].cells:
+                            _cm = _re.match(r'^(.+?年)(.+?)(自.+)$', _cell.text.strip())
+                            if _cm:
+                                _cell.text = _cm.group(1) + _raw_country + _cm.group(3)
+
                 if i < len(doc_obj.tables):
                     _fill_word_table(doc_obj.tables[i], result_df)
 
@@ -1589,6 +1622,17 @@ with tab_batch:
                                     st.error(f"{_bwo}：AI 失敗（{e}），跳過")
                                     continue
                             result_df = apply_mapping_to_df(g_item_df, _b_hdrs, mapping)
+
+                            _b_raw_country = _infer_country(g_item_df)
+                            if _b_raw_country:
+                                result_df.columns = _replace_country_in_cols(list(result_df.columns), _b_raw_country)
+                                if ti < len(g_doc.tables):
+                                    import re as _re
+                                    for _cell in g_doc.tables[ti].rows[0].cells:
+                                        _cm = _re.match(r'^(.+?年)(.+?)(自.+)$', _cell.text.strip())
+                                        if _cm:
+                                            _cell.text = _cm.group(1) + _b_raw_country + _cm.group(3)
+
                             if ti < len(g_doc.tables):
                                 _fill_word_table(g_doc.tables[ti], result_df)
                             matched = sum(
