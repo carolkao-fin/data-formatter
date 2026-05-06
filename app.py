@@ -13,7 +13,7 @@ import streamlit as st
 HISTORY_FILE = "format_history.json"
 MODEL = "llama-3.3-70b-versatile"
 
-st.set_page_config(page_title="AI 資料格式整理", page_icon="📊", layout="wide")
+st.set_page_config(page_title="AI 資料格式整理", page_icon="🗂️", layout="wide")
 
 # ── persistence ───────────────────────────────────────────────────────────────
 
