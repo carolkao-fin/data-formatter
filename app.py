@@ -284,8 +284,20 @@ def get_mapping(client: Groq, raw_df: pd.DataFrame, target: dict) -> dict:
         _tgt_cols = list(_tbls[0][0]) if _tbls and _tbls[0] else []
 
     filtered_df = _filter_raw_by_keywords(raw_df, _tgt_cols)
+
+    # 欄位描述：若過長則退回「僅列名稱」模式，避免 413 Token 超限
     raw_desc = describe_raw_df(filtered_df)
+    _DESC_LIMIT = 2500
+    if len(raw_desc) > _DESC_LIMIT:
+        col_list = list(filtered_df.columns)
+        raw_desc = (
+            f"（欄位共 {len(col_list)} 欄，描述過長，僅列名稱）\n"
+            + "\n".join(f"  {c!r}" for c in col_list)
+        )
+
     raw_sample = filtered_df.head(3).to_string(index=False)
+    if len(raw_sample) > 800:
+        raw_sample = raw_sample[:800] + "\n…（已截斷）"
     tgt_desc = describe_target(target)
 
     resp = client.chat.completions.create(
@@ -298,7 +310,7 @@ def get_mapping(client: Groq, raw_df: pd.DataFrame, target: dict) -> dict:
 欄位結構：
 {raw_desc}
 
-前 5 筆範例：
+前 3 筆範例：
 {raw_sample}
 
 === 目標格式（使用者上傳的範例，請分析其結構意圖）===
@@ -1017,6 +1029,8 @@ with tab_main:
                     "raw_bytes": b"",
                 }
 
+                _filt_preview = _filter_raw_by_keywords(g_raw_df, first_tbl_headers)
+                st.caption(f"🔍 {wo}：原始 {len(g_raw_df.columns)} 欄 → 關鍵字過濾後 {len(_filt_preview.columns)} 欄送 AI")
                 with st.spinner(f"AI 分析「{source_label}」→「{wo}」…"):
                     try:
                         mapping = get_mapping(client, g_raw_df, focused_target)
