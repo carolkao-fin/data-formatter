@@ -720,10 +720,10 @@ with tab_main:
                     paras = target.get("paragraphs", [])
                     st.success(f"**{tmpl_file.name}** (Word) — {len(tables)} 個表格，{len(paras)} 個段落")
 
-    # Word 表格選擇器：每個資料來源（工作表或檔案）各自選擇填入的表格
-    word_options = []   # 供 button handler 取用
-    _multi_item_mode = len(_data_items) > 1  # 多資料來源模式
-    if target is not None and target["type"] == "word" and raw_files:
+    # ③ Word 表格：列出所有表格，讓使用者為每個表格指定資料來源
+    word_options = []   # 表格顯示標籤，供 button handler 取用
+    _multi_item_mode = len(_data_items) > 1
+    if target is not None and target["type"] == "word" and raw_files and _data_items:
         w_tables = target.get("tables", [])
         w_titles = target.get("table_titles", [])
 
@@ -741,39 +741,46 @@ with tab_main:
                 for i, tbl in enumerate(w_tables)
             ]
 
-            _tbl_title = "### ③ 設定每個資料來源要填入的表格（選填）" if _multi_item_mode else "### ③ 設定填入的表格"
-            st.markdown(_tbl_title)
-            _tbl_items = _data_items if _data_items else [{"file": raw_files[0], "sheet": None, "label": raw_files[0].name}]
-            for _itm in _tbl_items:
-                _ikey = f"item_tables_{_itm['label']}"
+            _source_opts = ["(不填寫)"] + [itm["label"] for itm in _data_items]
+
+            def _auto_match(tbl_title):
+                """依表格標題自動配對最接近的資料來源"""
+                key = tbl_title.strip().lower()
+                if key:
+                    for itm in _data_items:
+                        lbl = itm["label"].lower()
+                        if key == lbl or key in lbl or lbl in key:
+                            return itm["label"]
+                # 只有一個來源時直接配對
+                return _data_items[0]["label"] if len(_data_items) == 1 else None
+
+            st.markdown("### ③ 設定每個表格的資料來源")
+            st.caption("系統已依名稱自動預填，請確認或調整；設為「不填寫」的表格將略過")
+
+            for i, (tbl, wo) in enumerate(zip(w_tables, word_options)):
+                tbl_title = (w_titles[i] if i < len(w_titles) else "").strip()
+                _tkey = f"table_source_{i}"
+                if _tkey not in st.session_state:
+                    _auto = _auto_match(tbl_title)
+                    st.session_state[_tkey] = _auto if _auto else "(不填寫)"
+
                 with st.container(border=True):
-                    c_name, c_sel = st.columns([2, 5])
-                    with c_name:
-                        st.markdown(f"**{_itm['label']}**")
-                    with c_sel:
-                        _ms_kw: dict = {}
-                        if _multi_item_mode:
-                            _ms_kw["placeholder"] = "不選則自動選欄位最多的表格"
-                            _ms_kw["help"] = "選填；AI 以第一個選取的表格欄位做映射；不選則自動選欄位最多的表格"
-                        else:
-                            _ms_kw["help"] = "可複選；AI 以第一個選取的表格欄位做映射"
-                        st.multiselect(
-                            "填入表格",
-                            options=word_options,
-                            key=_ikey,
-                            label_visibility="collapsed",
-                            **_ms_kw,
+                    c_tbl, c_src = st.columns([4, 3])
+                    with c_tbl:
+                        st.markdown(f"**{wo}**")
+                        if tbl and len(tbl) > 1:
+                            st.dataframe(
+                                pd.DataFrame(tbl[1:3], columns=tbl[0]),
+                                use_container_width=True,
+                                height=100,
+                            )
+                    with c_src:
+                        st.selectbox(
+                            "資料來源",
+                            options=_source_opts,
+                            key=_tkey,
+                            help="選擇填入此表格的原始資料工作表或檔案",
                         )
-                        sel_preview = st.session_state.get(_ikey) or []
-                        if sel_preview:
-                            first_idx = word_options.index(sel_preview[0])
-                            chosen = w_tables[first_idx]
-                            if chosen and len(chosen) > 1:
-                                st.dataframe(
-                                    pd.DataFrame(chosen[1:4], columns=chosen[0]),
-                                    use_container_width=True,
-                                    height=130,
-                                )
 
     st.divider()
 
@@ -810,34 +817,25 @@ with tab_main:
             all_matched_info = []
             total_rows_processed = 0
 
-            for item in _data_items:
-                _label = item["label"]
-                _ikey = f"item_tables_{_label}"
-                sel_labels = st.session_state.get(_ikey) or []
-                g_raw_df = read_raw_file(item["file"], sheet_name=item["sheet"]) if _multi_item_mode else raw_df
-
-                if g_raw_df is None:
-                    st.warning(f"⚠️ {_label} 讀取失敗，跳過")
+            for i, (tbl_rt, wo) in enumerate(zip(w_tables_rt, word_options)):
+                _tkey = f"table_source_{i}"
+                source_label = st.session_state.get(_tkey, "(不填寫)")
+                if source_label == "(不填寫)":
                     continue
 
-                if not sel_labels:
-                    if _multi_item_mode:
-                        auto_idx = max(
-                            range(len(w_tables_rt)),
-                            key=lambda i: len(w_tables_rt[i][0]) if w_tables_rt[i] else 0,
-                            default=0,
-                        )
-                        tbl_idxs = [auto_idx]
-                    else:
-                        st.warning(f"⚠️ {_label} 未選取表格，跳過")
-                        continue
-                else:
-                    tbl_idxs = [word_options.index(s) for s in sel_labels]
+                item = next((x for x in _data_items if x["label"] == source_label), None)
+                if item is None:
+                    st.warning(f"⚠️ {wo}：找不到資料來源「{source_label}」，跳過")
+                    continue
 
-                # 以第一個選取表格的欄位為基準做 AI 映射
+                g_raw_df = read_raw_file(item["file"], sheet_name=item["sheet"])
+                if g_raw_df is None:
+                    st.warning(f"⚠️ {wo}：讀取「{source_label}」失敗，跳過")
+                    continue
+
                 first_tbl_headers = [
-                    c.text.strip() for c in doc_obj.tables[tbl_idxs[0]].rows[0].cells
-                ] if tbl_idxs[0] < len(doc_obj.tables) else []
+                    c.text.strip() for c in doc_obj.tables[i].rows[0].cells
+                ] if i < len(doc_obj.tables) else []
 
                 focused_target = {
                     "type": "excel",
@@ -845,21 +843,20 @@ with tab_main:
                     "raw_bytes": b"",
                 }
 
-                with st.spinner(f"AI 分析 {_label}…"):
+                with st.spinner(f"AI 分析「{source_label}」→「{wo}」…"):
                     try:
                         mapping = get_mapping(client, g_raw_df, focused_target)
                     except json.JSONDecodeError as e:
-                        st.error(f"{_label}：AI 回傳格式錯誤（{e}），跳過")
+                        st.error(f"{wo}：AI 回傳格式錯誤（{e}），跳過")
                         continue
                     except Exception as e:
-                        st.error(f"{_label}：AI 分析失敗（{e}），跳過")
+                        st.error(f"{wo}：AI 分析失敗（{e}），跳過")
                         continue
 
                 result_df = apply_mapping_to_df(g_raw_df, first_tbl_headers, mapping)
 
-                for idx in tbl_idxs:
-                    if idx < len(doc_obj.tables):
-                        _fill_word_table(doc_obj.tables[idx], result_df)
+                if i < len(doc_obj.tables):
+                    _fill_word_table(doc_obj.tables[i], result_df)
 
                 matched = sum(
                     1 for m in mapping.get("mappings", [])
@@ -867,20 +864,20 @@ with tab_main:
                 )
                 total_rows_processed += len(g_raw_df)
                 all_matched_info.append({
-                    "file": _label, "mapping": mapping,
+                    "file": source_label, "table": wo, "mapping": mapping,
                     "result_df": result_df, "target_cols": first_tbl_headers,
-                    "matched": matched, "tbl_idxs": tbl_idxs,
+                    "matched": matched, "tbl_idx": i,
                 })
 
                 analysis = mapping.get("structure_analysis")
                 if analysis:
-                    st.info(f"**{_label}** AI 理解：{analysis}")
-                with st.expander(f"📋 {_label} 轉換計畫"):
+                    st.info(f"**{wo}** AI 理解：{analysis}")
+                with st.expander(f"📋 {source_label} → {wo} 轉換計畫"):
                     show_mapping_table(mapping, g_raw_df, first_tbl_headers)
-                st.caption(f"**{_label}** → 填入表格 {[i+1 for i in tbl_idxs]}，{len(result_df):,} 筆")
+                st.caption(f"**{wo}** ← {source_label}，{len(result_df):,} 筆")
 
             if not all_matched_info:
-                st.error("所有原始資料均未處理（請確認已選取填入表格，或工作表讀取正常）")
+                st.error("所有表格均未處理（請確認已為至少一個表格指定資料來源）")
                 st.stop()
 
             buf = io.BytesIO()
