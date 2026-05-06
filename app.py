@@ -221,11 +221,23 @@ def describe_target(target: dict) -> str:
 
 # ── Column keyword filter ──────────────────────────────────────────────────────
 
+def _strip_country(s: str) -> str:
+    """
+    '2015-2017年法國自世界平均進口金額(t)' → '2015-2017年自世界平均進口金額(t)'
+    Pattern: {anything}年{country}自{rest} → {anything}年自{rest}
+    Returns original string if pattern not found.
+    """
+    import re
+    m = re.match(r'^(.+?年).+?(自.+)$', s)
+    return (m.group(1) + m.group(2)) if m else s
+
+
 def _filter_raw_by_keywords(raw_df: pd.DataFrame, target_cols: list[str]) -> pd.DataFrame:
     """
     Filter raw_df to only columns whose names share at least one keyword
     with any target column name. Falls back to full df if nothing matches.
-    Used to avoid 413 token-limit errors when raw data has many irrelevant columns.
+    Also compares country-stripped versions (e.g. '2015年法國自...' matches '2015年日本自...')
+    to handle cross-country column mapping.
     """
     import re
     if not target_cols or len(raw_df.columns) <= 20:
@@ -235,15 +247,22 @@ def _filter_raw_by_keywords(raw_df: pd.DataFrame, target_cols: list[str]) -> pd.
     for col in target_cols:
         col_str = str(col).strip()
         keywords.add(col_str)
+        keywords.add(_strip_country(col_str))
         for part in re.split(r'[\s（）()\[\]【】_\-/\\,，、+＋]', col_str):
             part = part.strip()
             if len(part) >= 2:
                 keywords.add(part)
 
-    keep = [
-        col for col in raw_df.columns
-        if any(kw in str(col) or str(col) in kw for kw in keywords if len(kw) >= 2)
-    ]
+    keep = []
+    for col in raw_df.columns:
+        col_str = str(col).strip()
+        col_stripped = _strip_country(col_str)
+        if any(
+            kw in col_str or col_str in kw or
+            kw in col_stripped or col_stripped in kw
+            for kw in keywords if len(kw) >= 2
+        ):
+            keep.append(col)
     return raw_df[keep] if keep else raw_df
 
 # ── AI Mapping ─────────────────────────────────────────────────────────────────
