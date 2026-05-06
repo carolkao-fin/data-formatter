@@ -1068,13 +1068,40 @@ with tab_batch:
                     accept_multiple_files=True,
                 )
                 b_raws = st.session_state.get(f"batch_raw_{gid}") or []
+                _b_items_ser: list[dict] = []   # {file_idx, sheet, label}
                 if b_raws:
                     names_str = "、".join(f.name for f in b_raws)
                     st.caption(f"✅ {len(b_raws)} 個檔案：{names_str}")
-                if len(b_raws) == 1 and b_raws[0].name.lower().endswith((".xlsx", ".xls")):
-                    _brs = _excel_sheets(b_raws[0])
-                    if len(_brs) > 1:
-                        st.selectbox("工作表（原始資料）", _brs, key=f"batch_raw_sheet_{gid}")
+                    if len(b_raws) == 1:
+                        _brf0 = b_raws[0]
+                        if _brf0.name.lower().endswith((".xlsx", ".xls")):
+                            _brs = _excel_sheets(_brf0)
+                            if len(_brs) > 1:
+                                _bsel = st.multiselect(
+                                    "工作表（可複選）", _brs, default=_brs[:1],
+                                    key=f"batch_raw_sheets_{gid}",
+                                    help="Word 輸出：每個工作表各自 AI 映射並填入對應表格",
+                                )
+                                for sn in (_bsel if _bsel else _brs[:1]):
+                                    _b_items_ser.append({"file_idx": 0, "sheet": sn, "label": sn})
+                            else:
+                                _b_items_ser = [{"file_idx": 0, "sheet": None, "label": _brf0.name}]
+                        else:
+                            _b_items_ser = [{"file_idx": 0, "sheet": None, "label": _brf0.name}]
+                    else:
+                        for _bfi, _brf in enumerate(b_raws):
+                            if _brf.name.lower().endswith((".xlsx", ".xls")):
+                                _brs = _excel_sheets(_brf)
+                                if len(_brs) > 1:
+                                    _bsel = st.multiselect(
+                                        f"{_brf.name} — 工作表（可複選）", _brs, default=_brs[:1],
+                                        key=f"batch_raw_sheets_{gid}_{_bfi}",
+                                    )
+                                    for sn in (_bsel if _bsel else _brs[:1]):
+                                        _b_items_ser.append({"file_idx": _bfi, "sheet": sn, "label": f"{_brf.name}／{sn}"})
+                                    continue
+                            _b_items_ser.append({"file_idx": _bfi, "sheet": None, "label": _brf.name})
+                st.session_state[f"batch_data_items_{gid}"] = _b_items_ser
 
             with bc2:
                 st.markdown("**目標格式**")
@@ -1100,30 +1127,99 @@ with tab_batch:
                         st.session_state.batch_group_ids.remove(gid)
                         st.rerun()
 
-            # Word 表格選擇器（上傳 docx 後才顯示，複選）
-            if b_tmpl and b_tmpl.name.lower().endswith(".docx"):
+            # Word 表格設定：逐表格指定資料來源（與單一模式相同邏輯）
+            if b_tmpl and b_tmpl.name.lower().endswith(".docx") and _b_items_ser:
                 try:
                     _bt = read_target_file(b_tmpl)
-                    _w_tables = _bt.get("tables", []) if _bt else []
-                    _w_titles = _bt.get("table_titles", []) if _bt else []
-                    if _w_tables:
-                        def _blabel(i, tbl, title=""):
-                            h = tbl[0] if tbl else []
-                            prev = " | ".join(str(x) for x in h[:6])
-                            if len(h) > 6:
-                                prev += " | …"
-                            name = title.strip() if title.strip() else f"表格 {i+1}"
-                            return f"{name}（{len(h)} 欄）：{prev}"
-                        _opts = [
-                            _blabel(i, t, _w_titles[i] if i < len(_w_titles) else "")
-                            for i, t in enumerate(_w_tables)
-                        ]
-                        st.multiselect(
-                            "🎯 選擇要填入資料的表格（可複選）",
-                            options=_opts,
-                            key=f"batch_word_tbl_{gid}",
-                            help="可同時選多個結構相同的表格，AI 以第一個選取的欄位做映射",
-                        )
+                    _bw_tables = _bt.get("tables", []) if _bt else []
+                    _bw_titles = _bt.get("table_titles", []) if _bt else []
+                    if _bw_tables:
+                        _b_src_opts = ["(不填寫)"] + [itm["label"] for itm in _b_items_ser]
+
+                        def _b_auto_match(ttl):
+                            k = ttl.strip().lower()
+                            if k:
+                                for itm in _b_items_ser:
+                                    lb = itm["label"].lower()
+                                    if k == lb or k in lb or lb in k:
+                                        return itm["label"]
+                            return _b_items_ser[0]["label"] if len(_b_items_ser) == 1 else None
+
+                        _b_active_key = f"batch_active_tables_{gid}"
+                        if _b_active_key not in st.session_state:
+                            st.session_state[_b_active_key] = list(range(len(_bw_tables)))
+
+                        _b_active_idxs = list(st.session_state[_b_active_key])
+                        _b_hidden_idxs = [i for i in range(len(_bw_tables)) if i not in _b_active_idxs]
+
+                        st.markdown("**③ 設定每個表格的資料來源**")
+                        st.caption("可修改表格名稱、✕ 移除、底部可加回")
+
+                        for ti in _b_active_idxs:
+                            _btbl = _bw_tables[ti]
+                            _btdet = (_bw_titles[ti] if ti < len(_bw_titles) else "").strip()
+                            _b_tkey = f"batch_table_source_{gid}_{ti}"
+                            _b_hokey = f"batch_table_headers_orig_{gid}_{ti}"
+                            _b_hkey = f"batch_table_headers_{gid}_{ti}"
+                            _b_tkkey = f"batch_table_title_{gid}_{ti}"
+
+                            if _b_tkey not in st.session_state:
+                                _bam = _b_auto_match(_btdet)
+                                st.session_state[_b_tkey] = _bam if _bam else "(不填寫)"
+                            if _b_hokey not in st.session_state:
+                                st.session_state[_b_hokey] = list(_btbl[0]) if _btbl else []
+                            if _b_tkkey not in st.session_state:
+                                st.session_state[_b_tkkey] = _btdet or f"表格 {ti+1}"
+
+                            _b_chdrs = st.session_state.get(_b_hkey, st.session_state[_b_hokey])
+                            _b_cprev = " | ".join(str(h) for h in _b_chdrs[:5])
+                            if len(_b_chdrs) > 5:
+                                _b_cprev += " | …"
+
+                            with st.container(border=True):
+                                _bcn, _bcd = st.columns([6, 1])
+                                with _bcn:
+                                    st.text_input("表格名稱", key=_b_tkkey,
+                                                  label_visibility="collapsed",
+                                                  placeholder=f"表格 {ti+1}")
+                                with _bcd:
+                                    if st.button("✕", key=f"b_rm_{gid}_{ti}", help="移除此表格"):
+                                        st.session_state[_b_active_key].remove(ti)
+                                        st.session_state[_b_tkey] = "(不填寫)"
+                                        st.rerun()
+                                _bct, _bcs = st.columns([4, 3])
+                                with _bct:
+                                    st.caption(f"（{len(_b_chdrs)} 欄）：{_b_cprev}")
+                                    with st.expander("欄位名稱（可新增／刪除）"):
+                                        _b_hdf = pd.DataFrame({"欄位名稱": st.session_state[_b_hokey]})
+                                        _b_ed = st.data_editor(
+                                            _b_hdf, num_rows="dynamic",
+                                            use_container_width=True,
+                                            key=f"b_hdr_ed_{gid}_{ti}",
+                                            hide_index=True,
+                                            height=min(260, 45 + 35 * max(1, len(_b_chdrs))),
+                                        )
+                                        st.session_state[_b_hkey] = (
+                                            _b_ed["欄位名稱"].dropna().astype(str)
+                                            .loc[lambda s: s.str.strip() != ""].tolist()
+                                        )
+                                with _bcs:
+                                    st.selectbox("資料來源", options=_b_src_opts,
+                                                 key=_b_tkey,
+                                                 help="選擇填入此表格的原始資料工作表或檔案")
+
+                        if _b_hidden_idxs:
+                            st.markdown("**已移除（點擊加回）：**")
+                            _bhc = st.columns(min(len(_b_hidden_idxs), 4))
+                            for ci, hi in enumerate(_b_hidden_idxs):
+                                hi_t = st.session_state.get(
+                                    f"batch_table_title_{gid}_{hi}",
+                                    (_bw_titles[hi] if hi < len(_bw_titles) else "").strip() or f"表格 {hi+1}",
+                                )
+                                with _bhc[ci % len(_bhc)]:
+                                    if st.button(f"＋ {hi_t}", key=f"b_add_{gid}_{hi}"):
+                                        st.session_state[_b_active_key].append(hi)
+                                        st.rerun()
                 except Exception:
                     pass
 
@@ -1185,18 +1281,15 @@ with tab_batch:
             with st.container(border=True):
                 st.markdown(f"**⚙️ {group_label}**")
                 try:
-                    # 讀取並合併原始資料
-                    if len(b_raws) == 1:
-                        _g_raw_sheet = st.session_state.get(f"batch_raw_sheet_{gid}")
-                        g_raw_df = read_raw_file(b_raws[0], sheet_name=_g_raw_sheet)
-                        g_raw_name = b_raws[0].name
-                    else:
-                        g_raw_df, g_merged_names = merge_raw_files(b_raws)
-                        g_raw_name = f"merged_group{gid}"
-
-                    if g_raw_df is None:
-                        st.error("原始資料讀取失敗，跳過此群組")
-                        continue
+                    # 重建資料來源清單（file_idx → 實際 file 物件）
+                    _stored_items = st.session_state.get(f"batch_data_items_{gid}") or []
+                    g_data_items = []
+                    for _si in _stored_items:
+                        fi = _si.get("file_idx", 0)
+                        if fi < len(b_raws):
+                            g_data_items.append({"file": b_raws[fi], "sheet": _si["sheet"], "label": _si["label"]})
+                    if not g_data_items and b_raws:
+                        g_data_items = [{"file": b_raws[0], "sheet": None, "label": b_raws[0].name}]
 
                     # 讀取目標格式
                     _g_tmpl_sheet = st.session_state.get(f"batch_tmpl_sheet_{gid}")
@@ -1205,73 +1298,124 @@ with tab_batch:
                         st.error("目標格式讀取失敗，跳過此群組")
                         continue
 
-                    # 取得使用者選的表格索引清單（Word 才有，複選）
-                    g_force_tbls = None
-                    if g_target["type"] == "word":
-                        sel_labels = st.session_state.get(f"batch_word_tbl_{gid}") or []
-                        if sel_labels:
-                            _rt_tables = g_target.get("tables", [])
-                            _rt_titles = g_target.get("table_titles", [])
-                            def _blabel_rt(i, tbl, title=""):
-                                h = tbl[0] if tbl else []
-                                prev = " | ".join(str(x) for x in h[:6])
-                                if len(h) > 6:
-                                    prev += " | …"
-                                name = title.strip() if title.strip() else f"表格 {i+1}"
-                                return f"{name}（{len(h)} 欄）：{prev}"
-                            _opts_rt = [
-                                _blabel_rt(i, t, _rt_titles[i] if i < len(_rt_titles) else "")
-                                for i, t in enumerate(_rt_tables)
-                            ]
-                            g_force_tbls = []
-                            for sl in sel_labels:
-                                try:
-                                    g_force_tbls.append(_opts_rt.index(sl))
-                                except ValueError:
-                                    pass
-                            if not g_force_tbls:
-                                g_force_tbls = None
-
-                    # AI 分析與轉換
-                    with st.spinner(f"AI 分析 {group_label}…"):
-                        res = run_conversion(client, g_raw_df, g_target, g_raw_name, force_table_idxs=g_force_tbls)
-
-                    analysis = res["mapping"].get("structure_analysis")
-                    if analysis:
-                        st.info(f"AI 結構理解：{analysis}")
-
-                    # 套用自訂檔名
+                    g_raw_name = b_raws[0].name if b_raws else f"group{gid}"
                     batch_custom_name = (st.session_state.get(f"batch_outname_{gid}") or "").strip()
-                    if batch_custom_name:
-                        ext = res["out_name"].rsplit(".", 1)[-1]
-                        batch_ts = now.strftime("%Y%m%d_%H%M%S")
-                        res["out_name"] = f"{batch_custom_name}_{batch_ts}.{ext}"
+                    out_name_base = batch_custom_name or g_raw_name.rsplit(".", 1)[0]
 
-                    col_stat1, col_stat2 = st.columns(2)
-                    col_stat1.metric("處理筆數", f"{len(res['result_df']):,}")
-                    col_stat2.metric("映射欄位", f"{res['matched']}/{len(res['target_cols'])}")
+                    # ── Word：逐表格各自 AI 映射 ─────────────────────
+                    if g_target["type"] == "word":
+                        from docx import Document as _BDocX
+                        g_doc = _BDocX(io.BytesIO(g_target["raw_bytes"]))
+                        g_w_tables = g_target.get("tables", [])
+                        _b_active_key = f"batch_active_tables_{gid}"
+                        _b_act_idxs = st.session_state.get(_b_active_key, list(range(len(g_w_tables))))
 
-                    st.dataframe(res["result_df"].head(5), use_container_width=True, height=160)
-                    st.caption(f"輸出檔名：{res['out_name']}")
+                        g_all_matched: list[dict] = []
+                        g_total_rows = 0
+                        for ti in _b_act_idxs:
+                            if ti >= len(g_w_tables):
+                                continue
+                            _bwo = st.session_state.get(f"batch_table_title_{gid}_{ti}", f"表格 {ti+1}")
+                            src_lbl = st.session_state.get(f"batch_table_source_{gid}_{ti}", "(不填寫)")
+                            if src_lbl == "(不填寫)":
+                                continue
+                            g_item = next((x for x in g_data_items if x["label"] == src_lbl), None)
+                            if g_item is None:
+                                st.warning(f"⚠️ {_bwo}：找不到來源「{src_lbl}」，跳過")
+                                continue
+                            g_item_df = read_raw_file(g_item["file"], sheet_name=g_item["sheet"])
+                            if g_item_df is None:
+                                st.warning(f"⚠️ {_bwo}：讀取失敗，跳過")
+                                continue
+                            _b_hdrs = (
+                                st.session_state.get(f"batch_table_headers_{gid}_{ti}")
+                                or st.session_state.get(f"batch_table_headers_orig_{gid}_{ti}")
+                                or ([c.text.strip() for c in g_doc.tables[ti].rows[0].cells]
+                                    if ti < len(g_doc.tables) else [])
+                            )
+                            _b_foc = {"type": "excel", "df": pd.DataFrame(columns=_b_hdrs), "raw_bytes": b""}
+                            with st.spinner(f"AI 分析「{src_lbl}」→「{_bwo}」…"):
+                                try:
+                                    mapping = get_mapping(client, g_item_df, _b_foc)
+                                except Exception as e:
+                                    st.error(f"{_bwo}：AI 失敗（{e}），跳過")
+                                    continue
+                            result_df = apply_mapping_to_df(g_item_df, _b_hdrs, mapping)
+                            if ti < len(g_doc.tables):
+                                _fill_word_table(g_doc.tables[ti], result_df)
+                            matched = sum(
+                                1 for m in mapping.get("mappings", [])
+                                if any(s in g_item_df.columns for s in m.get("source_cols", []))
+                            )
+                            g_total_rows += len(g_item_df)
+                            g_all_matched.append({
+                                "source": src_lbl, "table": _bwo,
+                                "result_df": result_df, "target_cols": _b_hdrs, "matched": matched,
+                            })
+                            st.caption(f"**{_bwo}** ← {src_lbl}，{len(result_df):,} 筆")
 
-                    batch_results.append({
-                        "filename": res["out_name"],
-                        "data": res["out_bytes"],
-                    })
+                        if not g_all_matched:
+                            st.warning(f"{group_label}：無任何表格被處理，跳過")
+                            continue
 
-                    log_entry = {
+                        _gbuf = io.BytesIO()
+                        g_doc.save(_gbuf)
+                        out_bytes = _gbuf.getvalue()
+                        out_name = f"{out_name_base}_{ts}.docx"
+                        out_type = "word"
+                        fr = g_all_matched[0]
+                        col_stat1, col_stat2 = st.columns(2)
+                        col_stat1.metric("處理筆數", f"{g_total_rows:,}")
+                        col_stat2.metric("映射欄位（首表）", f"{fr['matched']}/{len(fr['target_cols'])}")
+                        st.caption(f"輸出檔名：{out_name}")
+
+                    # ── Excel / CSV：合併所有來源後一次轉換 ─────────
+                    else:
+                        _g_dfs = []
+                        for _gi in g_data_items:
+                            _gdf = read_raw_file(_gi["file"], sheet_name=_gi["sheet"])
+                            if _gdf is not None:
+                                _g_dfs.append(_gdf)
+                        if not _g_dfs:
+                            st.error("原始資料讀取失敗，跳過此群組")
+                            continue
+                        try:
+                            g_raw_df = pd.concat(_g_dfs, ignore_index=True)
+                        except Exception as e:
+                            st.error(f"合併失敗：{e}")
+                            continue
+                        with st.spinner(f"AI 分析 {group_label}…"):
+                            res = run_conversion(client, g_raw_df, g_target, g_raw_name)
+                        analysis = res["mapping"].get("structure_analysis")
+                        if analysis:
+                            st.info(f"AI 結構理解：{analysis}")
+                        if batch_custom_name:
+                            ext = res["out_name"].rsplit(".", 1)[-1]
+                            res["out_name"] = f"{batch_custom_name}_{ts}.{ext}"
+                        col_stat1, col_stat2 = st.columns(2)
+                        col_stat1.metric("處理筆數", f"{len(res['result_df']):,}")
+                        col_stat2.metric("映射欄位", f"{res['matched']}/{len(res['target_cols'])}")
+                        st.dataframe(res["result_df"].head(5), use_container_width=True, height=160)
+                        st.caption(f"輸出檔名：{res['out_name']}")
+                        out_bytes = res["out_bytes"]
+                        out_name = res["out_name"]
+                        out_type = res["target_type"]
+                        g_total_rows = len(g_raw_df)
+                        g_all_matched = [{"result_df": res["result_df"], "target_cols": res["target_cols"], "matched": res["matched"]}]
+
+                    batch_results.append({"filename": out_name, "data": out_bytes})
+                    append_log({
                         "ts":            now.strftime("%Y-%m-%d %H:%M:%S"),
                         "date":          now.strftime("%Y-%m-%d"),
                         "time":          now.strftime("%H:%M:%S"),
                         "raw_file":      ", ".join(f.name for f in b_raws),
                         "template_file": b_tmpl.name,
-                        "output_file":   res["out_name"],
-                        "output_type":   res["target_type"],
-                        "rows":          len(g_raw_df),
-                        "mapped":        res["matched"],
-                        "total_cols":    len(res["target_cols"]),
-                    }
-                    append_log(log_entry)
+                        "output_file":   out_name,
+                        "output_type":   out_type,
+                        "rows":          g_total_rows,
+                        "mapped":        g_all_matched[0].get("matched", 0) if g_all_matched else 0,
+                        "total_cols":    len(g_all_matched[0].get("target_cols", [])) if g_all_matched else 0,
+                    })
                     st.success(f"✅ 完成")
 
                 except json.JSONDecodeError as e:
