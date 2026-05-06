@@ -221,36 +221,60 @@ def describe_target(target: dict) -> str:
 
 # ── Column keyword filter ──────────────────────────────────────────────────────
 
+_COUNTRY_AFTER = r'(?:平均|進口|出口|市占|金額|自)'  # 國家名稱後接的關鍵詞
+
 def _strip_country(s: str) -> str:
     """
-    '2015-2017年法國自世界平均進口金額(t)' → '2015-2017年自世界平均進口金額(t)'
-    Pattern: {anything}年{country}自{rest} → {anything}年自{rest}
-    Returns original string if pattern not found.
+    支援兩種國家位置模式，去除國家名稱：
+      模式1：年{country}自…   → 年自…
+      模式2：在{country}平均… → 在平均…
     """
     import re
     m = re.match(r'^(.+?年).+?(自.+)$', s)
-    return (m.group(1) + m.group(2)) if m else s
+    if m:
+        return m.group(1) + m.group(2)
+    m = re.match(rf'^(.+?在).{{2,6}}?({_COUNTRY_AFTER}.+)$', s)
+    if m:
+        return m.group(1) + m.group(2)
+    return s
 
 
 def _infer_country(df: pd.DataFrame) -> str | None:
-    """從 raw_df 欄位名稱推斷國家（取第一個符合『年{country}自』模式的欄位）。"""
+    """
+    從 raw_df 欄位名稱推斷國家名稱，支援：
+      模式1：年{country}自   → 擷取 country
+      模式2：在{country}平均/進口/… → 擷取 country
+    """
     import re
     for col in df.columns:
-        m = re.match(r'^.+?年(.+?)自.+$', str(col))
-        if m:
-            country = m.group(1).strip()
-            if country:
-                return country
+        col_str = str(col)
+        m = re.match(r'^.+?年(.+?)自.+$', col_str)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+        m = re.match(rf'^.+?在(.{{2,6}}?)(?={_COUNTRY_AFTER})', col_str)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
     return None
 
 
 def _replace_country_in_cols(cols: list[str], new_country: str) -> list[str]:
-    """將欄位名稱中 『年{country}自』 的國家部分替換為 new_country。"""
+    """
+    將欄位名稱中的國家名稱替換為 new_country，支援兩種模式：
+      模式1：年{country}自   → 年{new_country}自
+      模式2：在{country}平均… → 在{new_country}平均…
+    """
     import re
     result = []
     for col in cols:
         m = re.match(r'^(.+?年)(.+?)(自.+)$', col)
-        result.append(m.group(1) + new_country + m.group(3) if m else col)
+        if m:
+            result.append(m.group(1) + new_country + m.group(3))
+            continue
+        m = re.match(rf'^(.+?在)(.{{2,6}}?)({_COUNTRY_AFTER}.+)$', col)
+        if m:
+            result.append(m.group(1) + new_country + m.group(3))
+            continue
+        result.append(col)
     return result
 
 
@@ -1089,11 +1113,10 @@ with tab_main:
                 if _raw_country:
                     result_df.columns = _replace_country_in_cols(list(result_df.columns), _raw_country)
                     if i < len(doc_obj.tables):
-                        import re as _re
-                        for _cell in doc_obj.tables[i].rows[0].cells:
-                            _cm = _re.match(r'^(.+?年)(.+?)(自.+)$', _cell.text.strip())
-                            if _cm:
-                                _cell.text = _cm.group(1) + _raw_country + _cm.group(3)
+                        _old_hdrs = [c.text.strip() for c in doc_obj.tables[i].rows[0].cells]
+                        _new_hdrs = _replace_country_in_cols(_old_hdrs, _raw_country)
+                        for _cell, _nh in zip(doc_obj.tables[i].rows[0].cells, _new_hdrs):
+                            _cell.text = _nh
 
                 if i < len(doc_obj.tables):
                     _fill_word_table(doc_obj.tables[i], result_df)
@@ -1627,11 +1650,10 @@ with tab_batch:
                             if _b_raw_country:
                                 result_df.columns = _replace_country_in_cols(list(result_df.columns), _b_raw_country)
                                 if ti < len(g_doc.tables):
-                                    import re as _re
-                                    for _cell in g_doc.tables[ti].rows[0].cells:
-                                        _cm = _re.match(r'^(.+?年)(.+?)(自.+)$', _cell.text.strip())
-                                        if _cm:
-                                            _cell.text = _cm.group(1) + _b_raw_country + _cm.group(3)
+                                    _b_old_hdrs = [c.text.strip() for c in g_doc.tables[ti].rows[0].cells]
+                                    _b_new_hdrs = _replace_country_in_cols(_b_old_hdrs, _b_raw_country)
+                                    for _cell, _nh in zip(g_doc.tables[ti].rows[0].cells, _b_new_hdrs):
+                                        _cell.text = _nh
 
                             if ti < len(g_doc.tables):
                                 _fill_word_table(g_doc.tables[ti], result_df)
