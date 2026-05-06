@@ -842,6 +842,65 @@ with tab_main:
                             st.session_state[_active_key].append(hi)
                             st.rerun()
 
+            # 自訂表格
+            _ctkey = f"custom_tbls_{tmpl_file.name}"
+            if _ctkey not in st.session_state:
+                st.session_state[_ctkey] = []
+            _tmpl_name = tmpl_file.name
+
+            for ci, ctbl in enumerate(st.session_state[_ctkey]):
+                _csrc_key = f"custom_src_{_tmpl_name}_{ci}"
+                if _csrc_key not in st.session_state:
+                    st.session_state[_csrc_key] = _source_opts[1] if len(_source_opts) > 1 else "(不填寫)"
+                with st.container(border=True):
+                    _cc_n, _cc_d = st.columns([6, 1])
+                    with _cc_n:
+                        st.markdown(f"**＋ 自訂：{ctbl['name']}**")
+                    with _cc_d:
+                        if st.button("✕", key=f"rm_custom_{ci}", help="移除此自訂表格"):
+                            st.session_state[_ctkey].pop(ci)
+                            st.rerun()
+                    _cc_t, _cc_s = st.columns([4, 3])
+                    with _cc_t:
+                        _ch_prev = " | ".join(str(h) for h in ctbl["headers"][:5])
+                        if len(ctbl["headers"]) > 5:
+                            _ch_prev += " | …"
+                        st.caption(f"（{len(ctbl['headers'])} 欄）：{_ch_prev}")
+                    with _cc_s:
+                        st.selectbox("資料來源", options=_source_opts, key=_csrc_key)
+
+            _add_custom_key = f"show_add_custom_{_tmpl_name}"
+            if st.button("＋ 新增自訂表格", key=f"btn_add_custom_{_tmpl_name}"):
+                st.session_state[_add_custom_key] = True
+
+            if st.session_state.get(_add_custom_key):
+                with st.container(border=True):
+                    st.markdown("**新增自訂表格**")
+                    _new_name = st.text_input("表格名稱", key=f"new_custom_name_{_tmpl_name}", placeholder="例如：附表一")
+                    _new_hdrs_edited = st.data_editor(
+                        pd.DataFrame({"欄位名稱": [""]}),
+                        num_rows="dynamic", use_container_width=True,
+                        key=f"new_custom_hdrs_{_tmpl_name}", hide_index=True,
+                    )
+                    _new_src = st.selectbox("資料來源", options=_source_opts, key=f"new_custom_src_{_tmpl_name}")
+                    _ca, _cb = st.columns(2)
+                    with _ca:
+                        if st.button("確認新增", key=f"confirm_add_custom_{_tmpl_name}"):
+                            _ncols = (_new_hdrs_edited["欄位名稱"].dropna().astype(str)
+                                      .loc[lambda s: s.str.strip() != ""].tolist())
+                            if _new_name.strip() and _ncols:
+                                st.session_state[_ctkey].append({"name": _new_name.strip(), "headers": _ncols})
+                                _ci_new = len(st.session_state[_ctkey]) - 1
+                                st.session_state[f"custom_src_{_tmpl_name}_{_ci_new}"] = _new_src
+                                st.session_state[_add_custom_key] = False
+                                st.rerun()
+                            else:
+                                st.warning("請填寫表格名稱並至少新增一個欄位")
+                    with _cb:
+                        if st.button("取消", key=f"cancel_add_custom_{_tmpl_name}"):
+                            st.session_state[_add_custom_key] = False
+                            st.rerun()
+
     st.divider()
 
     # 自訂輸出檔名
@@ -944,6 +1003,47 @@ with tab_main:
                 with st.expander(f"📋 {source_label} → {wo} 轉換計畫"):
                     show_mapping_table(mapping, g_raw_df, first_tbl_headers)
                 st.caption(f"**{wo}** ← {source_label}，{len(result_df):,} 筆")
+
+            # 處理自訂表格（新增至 Word 尾端）
+            _ctkey = f"custom_tbls_{tmpl_file.name}"
+            _tmpl_name = tmpl_file.name
+            for ci, ctbl in enumerate(st.session_state.get(_ctkey, [])):
+                _csrc_label = st.session_state.get(f"custom_src_{_tmpl_name}_{ci}", "(不填寫)")
+                if _csrc_label == "(不填寫)":
+                    continue
+                item = next((x for x in _data_items if x["label"] == _csrc_label), None)
+                if item is None:
+                    st.warning(f"⚠️ 自訂表格「{ctbl['name']}」：找不到資料來源「{_csrc_label}」，跳過")
+                    continue
+                g_raw_df = read_raw_file(item["file"], sheet_name=item["sheet"])
+                if g_raw_df is None:
+                    st.warning(f"⚠️ 自訂表格「{ctbl['name']}」：讀取失敗，跳過")
+                    continue
+                _custom_hdrs = ctbl["headers"]
+                focused_target = {"type": "excel", "df": pd.DataFrame(columns=_custom_hdrs), "raw_bytes": b""}
+                with st.spinner(f"AI 分析「{_csrc_label}」→「{ctbl['name']}」…"):
+                    try:
+                        mapping = get_mapping(client, g_raw_df, focused_target)
+                    except Exception as e:
+                        st.error(f"自訂表格「{ctbl['name']}」：AI 分析失敗（{e}），跳過")
+                        continue
+                result_df = apply_mapping_to_df(g_raw_df, _custom_hdrs, mapping)
+                new_tbl = doc_obj.add_table(rows=1, cols=len(_custom_hdrs))
+                new_tbl.style = "Table Grid"
+                for j, h in enumerate(_custom_hdrs):
+                    new_tbl.rows[0].cells[j].text = h
+                _fill_word_table(new_tbl, result_df)
+                matched = sum(
+                    1 for m in mapping.get("mappings", [])
+                    if any(s in g_raw_df.columns for s in m.get("source_cols", []))
+                )
+                total_rows_processed += len(g_raw_df)
+                all_matched_info.append({
+                    "file": _csrc_label, "table": ctbl["name"], "mapping": mapping,
+                    "result_df": result_df, "target_cols": _custom_hdrs,
+                    "matched": matched, "tbl_idx": -1,
+                })
+                st.caption(f"**{ctbl['name']}**（自訂）← {_csrc_label}，{len(result_df):,} 筆")
 
             if not all_matched_info:
                 st.error("所有表格均未處理（請確認已為至少一個表格指定資料來源）")
@@ -1220,6 +1320,64 @@ with tab_batch:
                                     if st.button(f"＋ {hi_t}", key=f"b_add_{gid}_{hi}"):
                                         st.session_state[_b_active_key].append(hi)
                                         st.rerun()
+
+                        # 批次：自訂表格
+                        _b_ctkey = f"batch_custom_tbls_{gid}"
+                        if _b_ctkey not in st.session_state:
+                            st.session_state[_b_ctkey] = []
+
+                        for ci, ctbl in enumerate(st.session_state[_b_ctkey]):
+                            _bcsrc_key = f"batch_custom_src_{gid}_{ci}"
+                            if _bcsrc_key not in st.session_state:
+                                st.session_state[_bcsrc_key] = _b_src_opts[1] if len(_b_src_opts) > 1 else "(不填寫)"
+                            with st.container(border=True):
+                                _bcc_n, _bcc_d = st.columns([6, 1])
+                                with _bcc_n:
+                                    st.markdown(f"**＋ 自訂：{ctbl['name']}**")
+                                with _bcc_d:
+                                    if st.button("✕", key=f"b_rm_custom_{gid}_{ci}", help="移除此自訂表格"):
+                                        st.session_state[_b_ctkey].pop(ci)
+                                        st.rerun()
+                                _bcc_t, _bcc_s = st.columns([4, 3])
+                                with _bcc_t:
+                                    _bch_prev = " | ".join(str(h) for h in ctbl["headers"][:5])
+                                    if len(ctbl["headers"]) > 5:
+                                        _bch_prev += " | …"
+                                    st.caption(f"（{len(ctbl['headers'])} 欄）：{_bch_prev}")
+                                with _bcc_s:
+                                    st.selectbox("資料來源", options=_b_src_opts, key=_bcsrc_key)
+
+                        _b_add_key = f"b_show_add_custom_{gid}"
+                        if st.button("＋ 新增自訂表格", key=f"b_btn_add_custom_{gid}"):
+                            st.session_state[_b_add_key] = True
+
+                        if st.session_state.get(_b_add_key):
+                            with st.container(border=True):
+                                st.markdown("**新增自訂表格**")
+                                _bn_name = st.text_input("表格名稱", key=f"b_new_custom_name_{gid}", placeholder="例如：附表一")
+                                _bn_edited = st.data_editor(
+                                    pd.DataFrame({"欄位名稱": [""]}),
+                                    num_rows="dynamic", use_container_width=True,
+                                    key=f"b_new_custom_hdrs_{gid}", hide_index=True,
+                                )
+                                _bn_src = st.selectbox("資料來源", options=_b_src_opts, key=f"b_new_custom_src_{gid}")
+                                _bca, _bcb = st.columns(2)
+                                with _bca:
+                                    if st.button("確認新增", key=f"b_confirm_add_custom_{gid}"):
+                                        _bncols = (_bn_edited["欄位名稱"].dropna().astype(str)
+                                                   .loc[lambda s: s.str.strip() != ""].tolist())
+                                        if _bn_name.strip() and _bncols:
+                                            st.session_state[_b_ctkey].append({"name": _bn_name.strip(), "headers": _bncols})
+                                            _b_ci_new = len(st.session_state[_b_ctkey]) - 1
+                                            st.session_state[f"batch_custom_src_{gid}_{_b_ci_new}"] = _bn_src
+                                            st.session_state[_b_add_key] = False
+                                            st.rerun()
+                                        else:
+                                            st.warning("請填寫表格名稱並至少新增一個欄位")
+                                with _bcb:
+                                    if st.button("取消", key=f"b_cancel_add_custom_{gid}"):
+                                        st.session_state[_b_add_key] = False
+                                        st.rerun()
                 except Exception:
                     pass
 
@@ -1353,6 +1511,45 @@ with tab_batch:
                                 "result_df": result_df, "target_cols": _b_hdrs, "matched": matched,
                             })
                             st.caption(f"**{_bwo}** ← {src_lbl}，{len(result_df):,} 筆")
+
+                        # 批次：處理自訂表格
+                        _b_ctkey = f"batch_custom_tbls_{gid}"
+                        for ci, ctbl in enumerate(st.session_state.get(_b_ctkey, [])):
+                            _bcsrc = st.session_state.get(f"batch_custom_src_{gid}_{ci}", "(不填寫)")
+                            if _bcsrc == "(不填寫)":
+                                continue
+                            g_citem = next((x for x in g_data_items if x["label"] == _bcsrc), None)
+                            if g_citem is None:
+                                st.warning(f"⚠️ 自訂表格「{ctbl['name']}」：找不到來源，跳過")
+                                continue
+                            g_cdf = read_raw_file(g_citem["file"], sheet_name=g_citem["sheet"])
+                            if g_cdf is None:
+                                st.warning(f"⚠️ 自訂表格「{ctbl['name']}」：讀取失敗，跳過")
+                                continue
+                            _c_hdrs = ctbl["headers"]
+                            _c_foc = {"type": "excel", "df": pd.DataFrame(columns=_c_hdrs), "raw_bytes": b""}
+                            with st.spinner(f"AI 分析「{_bcsrc}」→「{ctbl['name']}」…"):
+                                try:
+                                    c_mapping = get_mapping(client, g_cdf, _c_foc)
+                                except Exception as e:
+                                    st.error(f"自訂表格「{ctbl['name']}」：AI 失敗（{e}），跳過")
+                                    continue
+                            c_result = apply_mapping_to_df(g_cdf, _c_hdrs, c_mapping)
+                            c_tbl = g_doc.add_table(rows=1, cols=len(_c_hdrs))
+                            c_tbl.style = "Table Grid"
+                            for j, h in enumerate(_c_hdrs):
+                                c_tbl.rows[0].cells[j].text = h
+                            _fill_word_table(c_tbl, c_result)
+                            c_matched = sum(
+                                1 for m in c_mapping.get("mappings", [])
+                                if any(s in g_cdf.columns for s in m.get("source_cols", []))
+                            )
+                            g_total_rows += len(g_cdf)
+                            g_all_matched.append({
+                                "source": _bcsrc, "table": ctbl["name"],
+                                "result_df": c_result, "target_cols": _c_hdrs, "matched": c_matched,
+                            })
+                            st.caption(f"**{ctbl['name']}**（自訂）← {_bcsrc}，{len(c_result):,} 筆")
 
                         if not g_all_matched:
                             st.warning(f"{group_label}：無任何表格被處理，跳過")
