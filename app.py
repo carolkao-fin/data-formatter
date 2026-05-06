@@ -58,7 +58,8 @@ def read_raw_file(uploaded, sheet_name=None) -> pd.DataFrame | None:
         if name.endswith(".csv"):
             return pd.read_csv(uploaded)
         if name.endswith((".xlsx", ".xls")):
-            return pd.read_excel(uploaded, sheet_name=sheet_name if sheet_name is not None else 0)
+            engine = "xlrd" if name.endswith(".xls") else "openpyxl"
+            return pd.read_excel(uploaded, sheet_name=sheet_name if sheet_name is not None else 0, engine=engine)
         st.error("原始資料請上傳 CSV 或 Excel 檔案")
     except Exception as e:
         st.error(f"讀取失敗：{e}")
@@ -69,11 +70,21 @@ def _excel_sheets(uploaded) -> list[str]:
     uploaded.seek(0)
     try:
         raw = uploaded.read()
-        sheets = pd.ExcelFile(io.BytesIO(raw)).sheet_names
+    finally:
+        uploaded.seek(0)
+    name = uploaded.name.lower()
+    try:
+        if name.endswith(".xlsx"):
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)
+            sheets = list(wb.sheetnames)
+            wb.close()
+            return sheets
+        if name.endswith(".xls"):
+            return pd.ExcelFile(io.BytesIO(raw), engine="xlrd").sheet_names
     except Exception:
-        sheets = []
-    uploaded.seek(0)
-    return sheets
+        pass
+    return []
 
 def merge_raw_files(uploaded_files) -> tuple[pd.DataFrame | None, list[str]]:
     """合併多個原始資料檔案為一個 DataFrame，回傳 (merged_df, file_name_list)"""
@@ -107,7 +118,8 @@ def read_target_file(uploaded, sheet_name=None) -> dict | None:
 
     if name.endswith((".xlsx", ".xls")):
         try:
-            df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=sheet_name if sheet_name is not None else 0)
+            engine = "xlrd" if name.endswith(".xls") else "openpyxl"
+            df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=sheet_name if sheet_name is not None else 0, engine=engine)
             return {"type": "excel", "df": df, "raw_bytes": raw_bytes}
         except Exception as e:
             st.error(f"讀取 Excel 失敗：{e}")
