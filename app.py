@@ -221,61 +221,37 @@ def describe_target(target: dict) -> str:
 
 # ── Column keyword filter ──────────────────────────────────────────────────────
 
-_COUNTRY_AFTER = r'(?:平均|進口|出口|市占|金額|自)'  # 國家名稱後接的關鍵詞
-
 def _strip_country(s: str) -> str:
     """
-    支援兩種國家位置模式，去除國家名稱：
-      模式1：年{country}自…   → 年自…
-      模式2：在{country}平均… → 在平均…
+    去除欄位名稱中的國家名稱，用於關鍵字過濾的跨國比對。
+    支援：年{country}自/對…、在{country}平均/進口/出口…
     """
     import re
-    m = re.match(r'^(.+?年).+?(自.+)$', s)
+    m = re.match(r'^(.+?年).+?((?:自|對).+)$', s)
     if m:
         return m.group(1) + m.group(2)
-    m = re.match(rf'^(.+?在).{{2,6}}?({_COUNTRY_AFTER}.+)$', s)
+    m = re.match(r'^(.+?在).{2,6}?((?:平均|進口|出口|市占|金額).+)$', s)
     if m:
         return m.group(1) + m.group(2)
     return s
 
 
-def _infer_country(df: pd.DataFrame) -> str | None:
+def _infer_country_from_cols(cols) -> str | None:
     """
-    從 raw_df 欄位名稱推斷國家名稱，支援：
-      模式1：年{country}自   → 擷取 country
-      模式2：在{country}平均/進口/… → 擷取 country
-    """
-    import re
-    for col in df.columns:
-        col_str = str(col)
-        m = re.match(r'^.+?年(.+?)自.+$', col_str)
-        if m and m.group(1).strip():
-            return m.group(1).strip()
-        m = re.match(rf'^.+?在(.{{2,6}}?)(?={_COUNTRY_AFTER})', col_str)
-        if m and m.group(1).strip():
-            return m.group(1).strip()
-    return None
-
-
-def _replace_country_in_cols(cols: list[str], new_country: str) -> list[str]:
-    """
-    將欄位名稱中的國家名稱替換為 new_country，支援兩種模式：
-      模式1：年{country}自   → 年{new_country}自
-      模式2：在{country}平均… → 在{new_country}平均…
+    從欄位名稱清單推斷國家名稱。
+    依序嘗試：年{country}自/對、在{country}平均/進口/出口/市占/金額
     """
     import re
-    result = []
+    _pats = [
+        r'年(.+?)(?:自|對)',
+        r'在(.{2,6}?)(?:平均|進口|出口|市占|金額)',
+    ]
     for col in cols:
-        m = re.match(r'^(.+?年)(.+?)(自.+)$', col)
-        if m:
-            result.append(m.group(1) + new_country + m.group(3))
-            continue
-        m = re.match(rf'^(.+?在)(.{{2,6}}?)({_COUNTRY_AFTER}.+)$', col)
-        if m:
-            result.append(m.group(1) + new_country + m.group(3))
-            continue
-        result.append(col)
-    return result
+        for pat in _pats:
+            m = re.search(pat, str(col))
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+    return None
 
 
 def _filter_raw_by_keywords(raw_df: pd.DataFrame, target_cols: list[str]) -> pd.DataFrame:
@@ -1109,14 +1085,13 @@ with tab_main:
                 result_df = apply_mapping_to_df(g_raw_df, first_tbl_headers, mapping)
 
                 # 若原始資料國家與目標欄位國家不同，自動替換欄位名稱與 Word 標題列
-                _raw_country = _infer_country(g_raw_df)
-                if _raw_country:
-                    result_df.columns = _replace_country_in_cols(list(result_df.columns), _raw_country)
+                _raw_country = _infer_country_from_cols(list(g_raw_df.columns))
+                _tgt_country = _infer_country_from_cols(first_tbl_headers)
+                if _raw_country and _tgt_country and _raw_country != _tgt_country:
+                    result_df.columns = [c.replace(_tgt_country, _raw_country) for c in result_df.columns]
                     if i < len(doc_obj.tables):
-                        _old_hdrs = [c.text.strip() for c in doc_obj.tables[i].rows[0].cells]
-                        _new_hdrs = _replace_country_in_cols(_old_hdrs, _raw_country)
-                        for _cell, _nh in zip(doc_obj.tables[i].rows[0].cells, _new_hdrs):
-                            _cell.text = _nh
+                        for _cell in doc_obj.tables[i].rows[0].cells:
+                            _cell.text = _cell.text.replace(_tgt_country, _raw_country)
 
                 if i < len(doc_obj.tables):
                     _fill_word_table(doc_obj.tables[i], result_df)
@@ -1646,14 +1621,13 @@ with tab_batch:
                                     continue
                             result_df = apply_mapping_to_df(g_item_df, _b_hdrs, mapping)
 
-                            _b_raw_country = _infer_country(g_item_df)
-                            if _b_raw_country:
-                                result_df.columns = _replace_country_in_cols(list(result_df.columns), _b_raw_country)
+                            _b_raw_country = _infer_country_from_cols(list(g_item_df.columns))
+                            _b_tgt_country = _infer_country_from_cols(_b_hdrs)
+                            if _b_raw_country and _b_tgt_country and _b_raw_country != _b_tgt_country:
+                                result_df.columns = [c.replace(_b_tgt_country, _b_raw_country) for c in result_df.columns]
                                 if ti < len(g_doc.tables):
-                                    _b_old_hdrs = [c.text.strip() for c in g_doc.tables[ti].rows[0].cells]
-                                    _b_new_hdrs = _replace_country_in_cols(_b_old_hdrs, _b_raw_country)
-                                    for _cell, _nh in zip(g_doc.tables[ti].rows[0].cells, _b_new_hdrs):
-                                        _cell.text = _nh
+                                    for _cell in g_doc.tables[ti].rows[0].cells:
+                                        _cell.text = _cell.text.replace(_b_tgt_country, _b_raw_country)
 
                             if ti < len(g_doc.tables):
                                 _fill_word_table(g_doc.tables[ti], result_df)
