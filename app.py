@@ -645,7 +645,30 @@ with tab_main:
                 if raw_df is not None:
                     st.success(f"**{rf0.name}** — {len(raw_df):,} 筆 × {len(raw_df.columns)} 欄")
             else:
-                raw_df, merged_names = merge_raw_files(raw_files)
+                # 多檔：每個 Excel 檔各自顯示工作表選擇器
+                _file_sheet_sel: dict[int, str] = {}
+                for fi, rf in enumerate(raw_files):
+                    if rf.name.lower().endswith((".xlsx", ".xls")):
+                        _rs = _excel_sheets(rf)
+                        if len(_rs) > 1:
+                            _file_sheet_sel[fi] = st.selectbox(
+                                f"{rf.name} — 工作表",
+                                _rs,
+                                key=f"raw_sheet_multi_{fi}",
+                            )
+                _dfs, _names = [], []
+                for fi, rf in enumerate(raw_files):
+                    _df = read_raw_file(rf, sheet_name=_file_sheet_sel.get(fi))
+                    if _df is not None:
+                        _dfs.append(_df)
+                        _names.append(rf.name)
+                if _dfs:
+                    try:
+                        raw_df = pd.concat(_dfs, ignore_index=True)
+                        merged_names = _names
+                    except Exception as e:
+                        st.error(f"合併失敗：{e}")
+                        merged_names = _names
                 if raw_df is not None:
                     st.success(f"已合併 {len(merged_names)} 個檔案 → **{len(raw_df):,} 筆 × {len(raw_df.columns)} 欄**")
                     with st.expander(f"合併的檔案清單（{len(merged_names)} 個）"):
