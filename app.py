@@ -769,8 +769,13 @@ with tab_main:
                     with c_tbl:
                         st.markdown(f"**{wo}**")
                         if tbl and len(tbl) > 1:
+                            _hdr = tbl[0]
+                            _rows = [
+                                (r + [""] * len(_hdr))[:len(_hdr)]
+                                for r in tbl[1:3]
+                            ]
                             st.dataframe(
-                                pd.DataFrame(tbl[1:3], columns=tbl[0]),
+                                pd.DataFrame(_rows, columns=_hdr),
                                 use_container_width=True,
                                 height=100,
                             )
