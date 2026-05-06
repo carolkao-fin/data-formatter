@@ -184,7 +184,7 @@ def read_target_file(uploaded, sheet_name=None) -> dict | None:
 
 # ── describe structure ────────────────────────────────────────────────────────
 
-def describe_raw_df(df: pd.DataFrame, n_sample: int = 5) -> str:
+def describe_raw_df(df: pd.DataFrame, n_sample: int = 3) -> str:
     lines = []
     for col in df.columns:
         series = df[col].dropna()
@@ -219,6 +219,33 @@ def describe_target(target: dict) -> str:
         lines.append(f"  段落（{p['style']}）：{p['text'][:80]}")
     return "\n".join(lines)
 
+# ── Column keyword filter ──────────────────────────────────────────────────────
+
+def _filter_raw_by_keywords(raw_df: pd.DataFrame, target_cols: list[str]) -> pd.DataFrame:
+    """
+    Filter raw_df to only columns whose names share at least one keyword
+    with any target column name. Falls back to full df if nothing matches.
+    Used to avoid 413 token-limit errors when raw data has many irrelevant columns.
+    """
+    import re
+    if not target_cols or len(raw_df.columns) <= 20:
+        return raw_df
+
+    keywords: set[str] = set()
+    for col in target_cols:
+        col_str = str(col).strip()
+        keywords.add(col_str)
+        for part in re.split(r'[\s（）()\[\]【】_\-/\\,，、+＋]', col_str):
+            part = part.strip()
+            if len(part) >= 2:
+                keywords.add(part)
+
+    keep = [
+        col for col in raw_df.columns
+        if any(kw in str(col) or str(col) in kw for kw in keywords if len(kw) >= 2)
+    ]
+    return raw_df[keep] if keep else raw_df
+
 # ── AI Mapping ─────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """你是資料結構分析與轉換專家。任務：
@@ -249,8 +276,16 @@ def _strip_json(text: str) -> str:
 
 
 def get_mapping(client: Groq, raw_df: pd.DataFrame, target: dict) -> dict:
-    raw_desc = describe_raw_df(raw_df)
-    raw_sample = raw_df.head(5).to_string(index=False)
+    # 取得目標欄位清單，用來過濾原始資料
+    if target["type"] == "excel":
+        _tgt_cols = list(target["df"].columns)
+    else:
+        _tbls = target.get("tables", [])
+        _tgt_cols = list(_tbls[0][0]) if _tbls and _tbls[0] else []
+
+    filtered_df = _filter_raw_by_keywords(raw_df, _tgt_cols)
+    raw_desc = describe_raw_df(filtered_df)
+    raw_sample = filtered_df.head(3).to_string(index=False)
     tgt_desc = describe_target(target)
 
     resp = client.chat.completions.create(
