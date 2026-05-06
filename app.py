@@ -786,9 +786,10 @@ with tab_main:
                 if len(_current_hdrs) > 5:
                     _cols_preview += " | …"
 
+                _pos = active_idxs.index(i)
                 with st.container(border=True):
-                    # 第一行：表格名稱（可改）+ 移除按鈕
-                    c_name, c_del = st.columns([6, 1])
+                    # 第一行：表格名稱（可改）+ 上移 + 下移 + 移除按鈕
+                    c_name, c_up, c_dn, c_del = st.columns([4, 1, 1, 1])
                     with c_name:
                         st.text_input(
                             "表格名稱",
@@ -796,6 +797,16 @@ with tab_main:
                             label_visibility="collapsed",
                             placeholder=f"表格 {i+1}",
                         )
+                    with c_up:
+                        if st.button("↑", key=f"up_tbl_{i}", disabled=(_pos == 0), help="上移"):
+                            st.session_state[_active_key][_pos - 1], st.session_state[_active_key][_pos] = \
+                                st.session_state[_active_key][_pos], st.session_state[_active_key][_pos - 1]
+                            st.rerun()
+                    with c_dn:
+                        if st.button("↓", key=f"dn_tbl_{i}", disabled=(_pos == len(active_idxs) - 1), help="下移"):
+                            st.session_state[_active_key][_pos], st.session_state[_active_key][_pos + 1] = \
+                                st.session_state[_active_key][_pos + 1], st.session_state[_active_key][_pos]
+                            st.rerun()
                     with c_del:
                         if st.button("✕", key=f"rm_tbl_{i}", help="從清單移除此表格"):
                             st.session_state[_active_key].remove(i)
@@ -1276,12 +1287,23 @@ with tab_batch:
                             if len(_b_chdrs) > 5:
                                 _b_cprev += " | …"
 
+                            _b_pos = _b_active_idxs.index(ti)
                             with st.container(border=True):
-                                _bcn, _bcd = st.columns([6, 1])
+                                _bcn, _b_cup, _b_cdn, _bcd = st.columns([4, 1, 1, 1])
                                 with _bcn:
                                     st.text_input("表格名稱", key=_b_tkkey,
                                                   label_visibility="collapsed",
                                                   placeholder=f"表格 {ti+1}")
+                                with _b_cup:
+                                    if st.button("↑", key=f"b_up_{gid}_{ti}", disabled=(_b_pos == 0), help="上移"):
+                                        st.session_state[_b_active_key][_b_pos - 1], st.session_state[_b_active_key][_b_pos] = \
+                                            st.session_state[_b_active_key][_b_pos], st.session_state[_b_active_key][_b_pos - 1]
+                                        st.rerun()
+                                with _b_cdn:
+                                    if st.button("↓", key=f"b_dn_{gid}_{ti}", disabled=(_b_pos == len(_b_active_idxs) - 1), help="下移"):
+                                        st.session_state[_b_active_key][_b_pos], st.session_state[_b_active_key][_b_pos + 1] = \
+                                            st.session_state[_b_active_key][_b_pos + 1], st.session_state[_b_active_key][_b_pos]
+                                        st.rerun()
                                 with _bcd:
                                     if st.button("✕", key=f"b_rm_{gid}_{ti}", help="移除此表格"):
                                         st.session_state[_b_active_key].remove(ti)
