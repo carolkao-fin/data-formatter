@@ -73,15 +73,23 @@ def _excel_sheets(uploaded) -> list[str]:
     finally:
         uploaded.seek(0)
     name = uploaded.name.lower()
-    try:
-        if name.endswith(".xlsx"):
+    if not name.endswith((".xlsx", ".xls")):
+        return []
+    engine = "xlrd" if name.endswith(".xls") else "openpyxl"
+    # 優先用 openpyxl 直接讀（不走 pandas 引擎偵測）
+    if engine == "openpyxl":
+        try:
             import openpyxl
             wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)
             sheets = list(wb.sheetnames)
             wb.close()
-            return sheets
-        if name.endswith(".xls"):
-            return pd.ExcelFile(io.BytesIO(raw), engine="xlrd").sheet_names
+            if sheets:
+                return sheets
+        except Exception:
+            pass
+    # fallback：pd.ExcelFile 加明確 engine
+    try:
+        return list(pd.ExcelFile(io.BytesIO(raw), engine=engine).sheet_names)
     except Exception:
         pass
     return []
@@ -759,8 +767,8 @@ with tab_main:
                     continue
 
                 tbl_idxs = [word_options.index(s) for s in sel_labels]
-                _fi_sheet = st.session_state.get("raw_sheet_single") if len(raw_files) == 1 else None
-                g_raw_df = read_raw_file(rf, sheet_name=_fi_sheet)
+                # 單一原始檔直接用 UI 階段已讀好的 raw_df，多檔才重新讀
+                g_raw_df = raw_df if len(raw_files) == 1 else read_raw_file(rf)
                 if g_raw_df is None:
                     continue
 
@@ -843,7 +851,7 @@ with tab_main:
         # ── Excel 或單純 Word 無選擇器：合併所有檔案後一次處理 ────────────────
         else:
             if len(raw_files) == 1:
-                single_raw_df = read_raw_file(raw_files[0], sheet_name=st.session_state.get("raw_sheet_single"))
+                single_raw_df = raw_df  # UI 階段已用正確 sheet 讀取，直接使用
                 raw_base = raw_files[0].name
             else:
                 single_raw_df, _ = merge_raw_files(raw_files)
