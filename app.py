@@ -51,18 +51,29 @@ def _make_client(key: str) -> Groq:
 
 # ── file reading ──────────────────────────────────────────────────────────────
 
-def read_raw_file(uploaded) -> pd.DataFrame | None:
+def read_raw_file(uploaded, sheet_name=None) -> pd.DataFrame | None:
     uploaded.seek(0)
     name = uploaded.name.lower()
     try:
         if name.endswith(".csv"):
             return pd.read_csv(uploaded)
         if name.endswith((".xlsx", ".xls")):
-            return pd.read_excel(uploaded)
+            return pd.read_excel(uploaded, sheet_name=sheet_name if sheet_name is not None else 0)
         st.error("原始資料請上傳 CSV 或 Excel 檔案")
     except Exception as e:
         st.error(f"讀取失敗：{e}")
     return None
+
+def _excel_sheets(uploaded) -> list[str]:
+    """回傳 Excel 各工作表名稱，不影響 seek 位置。"""
+    uploaded.seek(0)
+    try:
+        raw = uploaded.read()
+        sheets = pd.ExcelFile(io.BytesIO(raw)).sheet_names
+    except Exception:
+        sheets = []
+    uploaded.seek(0)
+    return sheets
 
 def merge_raw_files(uploaded_files) -> tuple[pd.DataFrame | None, list[str]]:
     """合併多個原始資料檔案為一個 DataFrame，回傳 (merged_df, file_name_list)"""
@@ -80,7 +91,7 @@ def merge_raw_files(uploaded_files) -> tuple[pd.DataFrame | None, list[str]]:
         st.error(f"合併失敗：{e}")
         return None, names
 
-def read_target_file(uploaded) -> dict | None:
+def read_target_file(uploaded, sheet_name=None) -> dict | None:
     """
     Returns dict:
       { "type": "excel" | "word",
@@ -96,7 +107,7 @@ def read_target_file(uploaded) -> dict | None:
 
     if name.endswith((".xlsx", ".xls")):
         try:
-            df = pd.read_excel(io.BytesIO(raw_bytes))
+            df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=sheet_name if sheet_name is not None else 0)
             return {"type": "excel", "df": df, "raw_bytes": raw_bytes}
         except Exception as e:
             st.error(f"讀取 Excel 失敗：{e}")
@@ -598,9 +609,15 @@ with tab_main:
         raw_df = None
         if raw_files:
             if len(raw_files) == 1:
-                raw_df = read_raw_file(raw_files[0])
+                rf0 = raw_files[0]
+                _raw_sheet = None
+                if rf0.name.lower().endswith((".xlsx", ".xls")):
+                    _rs = _excel_sheets(rf0)
+                    if len(_rs) > 1:
+                        _raw_sheet = st.selectbox("工作表（原始資料）", _rs, key="raw_sheet_single")
+                raw_df = read_raw_file(rf0, sheet_name=_raw_sheet)
                 if raw_df is not None:
-                    st.success(f"**{raw_files[0].name}** — {len(raw_df):,} 筆 × {len(raw_df.columns)} 欄")
+                    st.success(f"**{rf0.name}** — {len(raw_df):,} 筆 × {len(raw_df.columns)} 欄")
             else:
                 raw_df, merged_names = merge_raw_files(raw_files)
                 if raw_df is not None:
@@ -625,7 +642,12 @@ with tab_main:
 
         target = None
         if tmpl_file:
-            target = read_target_file(tmpl_file)
+            _tmpl_sheet = None
+            if tmpl_file.name.lower().endswith((".xlsx", ".xls")):
+                _ts = _excel_sheets(tmpl_file)
+                if len(_ts) > 1:
+                    _tmpl_sheet = st.selectbox("工作表（目標格式）", _ts, key="tmpl_sheet_single")
+            target = read_target_file(tmpl_file, sheet_name=_tmpl_sheet)
             if target is not None:
                 if target["type"] == "excel":
                     df_preview = target["df"]
@@ -725,7 +747,8 @@ with tab_main:
                     continue
 
                 tbl_idxs = [word_options.index(s) for s in sel_labels]
-                g_raw_df = read_raw_file(rf)
+                _fi_sheet = st.session_state.get("raw_sheet_single") if len(raw_files) == 1 else None
+                g_raw_df = read_raw_file(rf, sheet_name=_fi_sheet)
                 if g_raw_df is None:
                     continue
 
@@ -808,7 +831,7 @@ with tab_main:
         # ── Excel 或單純 Word 無選擇器：合併所有檔案後一次處理 ────────────────
         else:
             if len(raw_files) == 1:
-                single_raw_df = read_raw_file(raw_files[0])
+                single_raw_df = read_raw_file(raw_files[0], sheet_name=st.session_state.get("raw_sheet_single"))
                 raw_base = raw_files[0].name
             else:
                 single_raw_df, _ = merge_raw_files(raw_files)
@@ -900,6 +923,10 @@ with tab_batch:
                 if b_raws:
                     names_str = "、".join(f.name for f in b_raws)
                     st.caption(f"✅ {len(b_raws)} 個檔案：{names_str}")
+                if len(b_raws) == 1 and b_raws[0].name.lower().endswith((".xlsx", ".xls")):
+                    _brs = _excel_sheets(b_raws[0])
+                    if len(_brs) > 1:
+                        st.selectbox("工作表（原始資料）", _brs, key=f"batch_raw_sheet_{gid}")
 
             with bc2:
                 st.markdown("**目標格式**")
@@ -912,6 +939,10 @@ with tab_batch:
                 b_tmpl = st.session_state.get(f"batch_tmpl_{gid}")
                 if b_tmpl:
                     st.caption(f"✅ {b_tmpl.name}")
+                if b_tmpl and b_tmpl.name.lower().endswith((".xlsx", ".xls")):
+                    _bts = _excel_sheets(b_tmpl)
+                    if len(_bts) > 1:
+                        st.selectbox("工作表（目標格式）", _bts, key=f"batch_tmpl_sheet_{gid}")
 
             with bc_del:
                 st.write("")
@@ -926,14 +957,19 @@ with tab_batch:
                 try:
                     _bt = read_target_file(b_tmpl)
                     _w_tables = _bt.get("tables", []) if _bt else []
+                    _w_titles = _bt.get("table_titles", []) if _bt else []
                     if _w_tables:
-                        def _blabel(i, tbl):
+                        def _blabel(i, tbl, title=""):
                             h = tbl[0] if tbl else []
                             prev = " | ".join(str(x) for x in h[:6])
                             if len(h) > 6:
                                 prev += " | …"
-                            return f"表格 {i+1}（{len(h)} 欄）：{prev}"
-                        _opts = [_blabel(i, t) for i, t in enumerate(_w_tables)]
+                            name = title.strip() if title.strip() else f"表格 {i+1}"
+                            return f"{name}（{len(h)} 欄）：{prev}"
+                        _opts = [
+                            _blabel(i, t, _w_titles[i] if i < len(_w_titles) else "")
+                            for i, t in enumerate(_w_tables)
+                        ]
                         st.multiselect(
                             "🎯 選擇要填入資料的表格（可複選）",
                             options=_opts,
@@ -1003,7 +1039,8 @@ with tab_batch:
                 try:
                     # 讀取並合併原始資料
                     if len(b_raws) == 1:
-                        g_raw_df = read_raw_file(b_raws[0])
+                        _g_raw_sheet = st.session_state.get(f"batch_raw_sheet_{gid}")
+                        g_raw_df = read_raw_file(b_raws[0], sheet_name=_g_raw_sheet)
                         g_raw_name = b_raws[0].name
                     else:
                         g_raw_df, g_merged_names = merge_raw_files(b_raws)
@@ -1014,7 +1051,8 @@ with tab_batch:
                         continue
 
                     # 讀取目標格式
-                    g_target = read_target_file(b_tmpl)
+                    _g_tmpl_sheet = st.session_state.get(f"batch_tmpl_sheet_{gid}")
+                    g_target = read_target_file(b_tmpl, sheet_name=_g_tmpl_sheet)
                     if g_target is None:
                         st.error("目標格式讀取失敗，跳過此群組")
                         continue
@@ -1024,13 +1062,24 @@ with tab_batch:
                     if g_target["type"] == "word":
                         sel_labels = st.session_state.get(f"batch_word_tbl_{gid}") or []
                         if sel_labels:
+                            _rt_tables = g_target.get("tables", [])
+                            _rt_titles = g_target.get("table_titles", [])
+                            def _blabel_rt(i, tbl, title=""):
+                                h = tbl[0] if tbl else []
+                                prev = " | ".join(str(x) for x in h[:6])
+                                if len(h) > 6:
+                                    prev += " | …"
+                                name = title.strip() if title.strip() else f"表格 {i+1}"
+                                return f"{name}（{len(h)} 欄）：{prev}"
+                            _opts_rt = [
+                                _blabel_rt(i, t, _rt_titles[i] if i < len(_rt_titles) else "")
+                                for i, t in enumerate(_rt_tables)
+                            ]
                             g_force_tbls = []
                             for sl in sel_labels:
                                 try:
-                                    g_force_tbls.append(
-                                        int(sl.split("（")[0].replace("表格", "").strip()) - 1
-                                    )
-                                except Exception:
+                                    g_force_tbls.append(_opts_rt.index(sl))
+                                except ValueError:
                                     pass
                             if not g_force_tbls:
                                 g_force_tbls = None
