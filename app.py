@@ -627,6 +627,7 @@ with tab_main:
         )
 
         raw_df = None
+        raw_selected_sheets: list[str] = []   # 多工作表選擇（單檔 xlsx）
         if raw_files:
             if len(raw_files) == 1:
                 rf0 = raw_files[0]
@@ -634,7 +635,12 @@ with tab_main:
                 if rf0.name.lower().endswith((".xlsx", ".xls")):
                     _rs = _excel_sheets(rf0)
                     if len(_rs) > 1:
-                        _raw_sheet = st.selectbox("工作表（原始資料）", _rs, key="raw_sheet_single")
+                        raw_selected_sheets = st.multiselect(
+                            "工作表（可複選）", _rs, default=_rs[:1],
+                            key="raw_sheets_multi",
+                            help="可選多個工作表；Word 輸出時每個工作表各自 AI 映射並填入對應表格；Excel 輸出使用第一個選取的工作表",
+                        )
+                        _raw_sheet = raw_selected_sheets[0] if raw_selected_sheets else _rs[0]
                 raw_df = read_raw_file(rf0, sheet_name=_raw_sheet)
                 if raw_df is not None:
                     st.success(f"**{rf0.name}** — {len(raw_df):,} 筆 × {len(raw_df.columns)} 欄")
@@ -680,8 +686,9 @@ with tab_main:
                     paras = target.get("paragraphs", [])
                     st.success(f"**{tmpl_file.name}** (Word) — {len(tables)} 個表格，{len(paras)} 個段落")
 
-    # Word 表格選擇器（每個原始資料各自選擇，複選）
+    # Word 表格選擇器（多工作表模式：每個工作表選擇；多檔模式：每個檔案選擇）
     word_options = []   # 供 button handler 取用
+    _multi_sheet_mode = len(raw_selected_sheets) > 1  # 單檔多工作表模式
     if target is not None and target["type"] == "word" and raw_files:
         w_tables = target.get("tables", [])
         w_titles = target.get("table_titles", [])
@@ -700,30 +707,57 @@ with tab_main:
                 for i, tbl in enumerate(w_tables)
             ]
 
-            st.markdown("### ③ 設定每個原始資料要填入的表格")
-            for fi, rf in enumerate(raw_files):
-                with st.container(border=True):
-                    c_name, c_sel = st.columns([2, 5])
-                    with c_name:
-                        st.markdown(f"**{rf.name}**")
-                    with c_sel:
-                        st.multiselect(
-                            "填入表格",
-                            options=word_options,
-                            key=f"single_file_tables_{fi}",
-                            label_visibility="collapsed",
-                            help="可複選；AI 以第一個選取的表格欄位做映射",
-                        )
-                        sel_preview = st.session_state.get(f"single_file_tables_{fi}") or []
-                        if sel_preview:
-                            first_idx = word_options.index(sel_preview[0])
-                            chosen = w_tables[first_idx]
-                            if chosen and len(chosen) > 1:
-                                st.dataframe(
-                                    pd.DataFrame(chosen[1:4], columns=chosen[0]),
-                                    use_container_width=True,
-                                    height=130,
-                                )
+            if _multi_sheet_mode:
+                st.markdown("### ③ 設定每個工作表要填入的表格（選填）")
+                for sheet_name in raw_selected_sheets:
+                    with st.container(border=True):
+                        c_name, c_sel = st.columns([2, 5])
+                        with c_name:
+                            st.markdown(f"**{sheet_name}**")
+                        with c_sel:
+                            st.multiselect(
+                                "填入表格",
+                                options=word_options,
+                                key=f"sheet_tables_{sheet_name}",
+                                label_visibility="collapsed",
+                                placeholder="不選則自動選欄位最多的表格",
+                                help="選填；AI 以第一個選取的表格欄位做映射；不選則自動選欄位最多的表格",
+                            )
+                            sel_preview = st.session_state.get(f"sheet_tables_{sheet_name}") or []
+                            if sel_preview:
+                                first_idx = word_options.index(sel_preview[0])
+                                chosen = w_tables[first_idx]
+                                if chosen and len(chosen) > 1:
+                                    st.dataframe(
+                                        pd.DataFrame(chosen[1:4], columns=chosen[0]),
+                                        use_container_width=True,
+                                        height=130,
+                                    )
+            else:
+                st.markdown("### ③ 設定每個原始資料要填入的表格")
+                for fi, rf in enumerate(raw_files):
+                    with st.container(border=True):
+                        c_name, c_sel = st.columns([2, 5])
+                        with c_name:
+                            st.markdown(f"**{rf.name}**")
+                        with c_sel:
+                            st.multiselect(
+                                "填入表格",
+                                options=word_options,
+                                key=f"single_file_tables_{fi}",
+                                label_visibility="collapsed",
+                                help="可複選；AI 以第一個選取的表格欄位做映射",
+                            )
+                            sel_preview = st.session_state.get(f"single_file_tables_{fi}") or []
+                            if sel_preview:
+                                first_idx = word_options.index(sel_preview[0])
+                                chosen = w_tables[first_idx]
+                                if chosen and len(chosen) > 1:
+                                    st.dataframe(
+                                        pd.DataFrame(chosen[1:4], columns=chosen[0]),
+                                        use_container_width=True,
+                                        height=130,
+                                    )
 
     st.divider()
 
@@ -760,17 +794,38 @@ with tab_main:
             all_matched_info = []
             total_rows_processed = 0
 
-            for fi, rf in enumerate(raw_files):
-                sel_labels = st.session_state.get(f"single_file_tables_{fi}") or []
-                if not sel_labels:
-                    st.warning(f"⚠️ {rf.name} 未選取表格，跳過")
+            # 建立迭代清單：(標籤, 資料來源描述) 供下方統一處理
+            if _multi_sheet_mode:
+                _iter_items = [(sn, "sheet") for sn in raw_selected_sheets]
+            else:
+                _iter_items = [(rf.name, fi) for fi, rf in enumerate(raw_files)]
+
+            for _li, (_label, _src) in enumerate(_iter_items):
+                if _multi_sheet_mode:
+                    sel_labels = st.session_state.get(f"sheet_tables_{_label}") or []
+                    g_raw_df = read_raw_file(raw_files[0], sheet_name=_label)
+                else:
+                    sel_labels = st.session_state.get(f"single_file_tables_{_src}") or []
+                    g_raw_df = raw_df if len(raw_files) == 1 else read_raw_file(raw_files[_src])
+
+                if g_raw_df is None:
+                    st.warning(f"⚠️ {_label} 讀取失敗，跳過")
                     continue
 
-                tbl_idxs = [word_options.index(s) for s in sel_labels]
-                # 單一原始檔直接用 UI 階段已讀好的 raw_df，多檔才重新讀
-                g_raw_df = raw_df if len(raw_files) == 1 else read_raw_file(rf)
-                if g_raw_df is None:
-                    continue
+                if not sel_labels:
+                    if _multi_sheet_mode:
+                        # 自動選欄位最多的表格
+                        auto_idx = max(
+                            range(len(w_tables_rt)),
+                            key=lambda i: len(w_tables_rt[i][0]) if w_tables_rt[i] else 0,
+                            default=0,
+                        )
+                        tbl_idxs = [auto_idx]
+                    else:
+                        st.warning(f"⚠️ {_label} 未選取表格，跳過")
+                        continue
+                else:
+                    tbl_idxs = [word_options.index(s) for s in sel_labels]
 
                 # 以第一個選取表格的欄位為基準做 AI 映射
                 first_tbl_headers = [
@@ -783,14 +838,14 @@ with tab_main:
                     "raw_bytes": b"",
                 }
 
-                with st.spinner(f"AI 分析 {rf.name}…"):
+                with st.spinner(f"AI 分析 {_label}…"):
                     try:
                         mapping = get_mapping(client, g_raw_df, focused_target)
                     except json.JSONDecodeError as e:
-                        st.error(f"{rf.name}：AI 回傳格式錯誤（{e}），跳過")
+                        st.error(f"{_label}：AI 回傳格式錯誤（{e}），跳過")
                         continue
                     except Exception as e:
-                        st.error(f"{rf.name}：AI 分析失敗（{e}），跳過")
+                        st.error(f"{_label}：AI 分析失敗（{e}），跳過")
                         continue
 
                 result_df = apply_mapping_to_df(g_raw_df, first_tbl_headers, mapping)
@@ -805,20 +860,20 @@ with tab_main:
                 )
                 total_rows_processed += len(g_raw_df)
                 all_matched_info.append({
-                    "file": rf.name, "mapping": mapping,
+                    "file": _label, "mapping": mapping,
                     "result_df": result_df, "target_cols": first_tbl_headers,
                     "matched": matched, "tbl_idxs": tbl_idxs,
                 })
 
                 analysis = mapping.get("structure_analysis")
                 if analysis:
-                    st.info(f"**{rf.name}** AI 理解：{analysis}")
-                with st.expander(f"📋 {rf.name} 轉換計畫"):
+                    st.info(f"**{_label}** AI 理解：{analysis}")
+                with st.expander(f"📋 {_label} 轉換計畫"):
                     show_mapping_table(mapping, g_raw_df, first_tbl_headers)
-                st.caption(f"**{rf.name}** → 填入表格 {[i+1 for i in tbl_idxs]}，{len(result_df):,} 筆")
+                st.caption(f"**{_label}** → 填入表格 {[i+1 for i in tbl_idxs]}，{len(result_df):,} 筆")
 
             if not all_matched_info:
-                st.error("所有原始資料均未處理（請確認已為每個檔案選取填入表格）")
+                st.error("所有原始資料均未處理（請確認已選取填入表格，或工作表讀取正常）")
                 st.stop()
 
             buf = io.BytesIO()
