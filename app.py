@@ -754,35 +754,59 @@ with tab_main:
                 # 只有一個來源時直接配對
                 return _data_items[0]["label"] if len(_data_items) == 1 else None
 
+            # 動態表格清單：可移除 / 加回
+            _active_key = f"active_tables_{tmpl_file.name}"
+            if _active_key not in st.session_state:
+                st.session_state[_active_key] = list(range(len(w_tables)))
+
+            active_idxs = list(st.session_state[_active_key])
+            hidden_idxs = [i for i in range(len(w_tables)) if i not in active_idxs]
+
             st.markdown("### ③ 設定每個表格的資料來源")
-            st.caption("系統已依名稱自動預填，請確認或調整；設為「不填寫」的表格將略過")
+            st.caption("可修改表格名稱（若辨識錯誤）、✕ 移除不需要的表格、底部可加回已移除的表格")
 
-            for i, (tbl, wo) in enumerate(zip(w_tables, word_options)):
-                tbl_title = (w_titles[i] if i < len(w_titles) else "").strip()
+            for i in active_idxs:
+                tbl = w_tables[i]
+                tbl_title_det = (w_titles[i] if i < len(w_titles) else "").strip()
                 _tkey = f"table_source_{i}"
-                if _tkey not in st.session_state:
-                    _auto = _auto_match(tbl_title)
-                    st.session_state[_tkey] = _auto if _auto else "(不填寫)"
-
-                # 固定初始欄位（data_editor delta 的基準，不可被 rerun 覆寫）
                 _hkey_orig = f"table_headers_orig_{i}"
                 _hkey = f"table_headers_{i}"
+                _title_key = f"table_title_{i}"
+
+                if _tkey not in st.session_state:
+                    _auto = _auto_match(tbl_title_det)
+                    st.session_state[_tkey] = _auto if _auto else "(不填寫)"
                 if _hkey_orig not in st.session_state:
                     st.session_state[_hkey_orig] = list(tbl[0]) if tbl else []
+                if _title_key not in st.session_state:
+                    st.session_state[_title_key] = tbl_title_det or f"表格 {i+1}"
 
-                # 目前有效欄位（每次 rerun 由 data_editor 回傳值更新）
                 _current_hdrs = st.session_state.get(_hkey, st.session_state[_hkey_orig])
-                _tbl_name = tbl_title or f"表格 {i+1}"
                 _cols_preview = " | ".join(str(h) for h in _current_hdrs[:5])
                 if len(_current_hdrs) > 5:
                     _cols_preview += " | …"
-                _dynamic_wo = f"{_tbl_name}（{len(_current_hdrs)} 欄）：{_cols_preview}"
 
                 with st.container(border=True):
+                    # 第一行：表格名稱（可改）+ 移除按鈕
+                    c_name, c_del = st.columns([6, 1])
+                    with c_name:
+                        st.text_input(
+                            "表格名稱",
+                            key=_title_key,
+                            label_visibility="collapsed",
+                            placeholder=f"表格 {i+1}",
+                        )
+                    with c_del:
+                        if st.button("✕", key=f"rm_tbl_{i}", help="從清單移除此表格"):
+                            st.session_state[_active_key].remove(i)
+                            st.session_state[_tkey] = "(不填寫)"
+                            st.rerun()
+
+                    # 第二行：欄位預覽 + 資料來源
                     c_tbl, c_src = st.columns([4, 3])
                     with c_tbl:
-                        st.markdown(f"**{_dynamic_wo}**")
-                        with st.expander("欄位名稱（點選修改 / ＋ 新增列 / 🗑 刪除列）", expanded=True):
+                        st.caption(f"（{len(_current_hdrs)} 欄）：{_cols_preview}")
+                        with st.expander("欄位名稱（可新增／刪除）"):
                             _hdr_df = pd.DataFrame({"欄位名稱": st.session_state[_hkey_orig]})
                             _edited = st.data_editor(
                                 _hdr_df,
@@ -790,7 +814,7 @@ with tab_main:
                                 use_container_width=True,
                                 key=f"hdr_editor_{i}",
                                 hide_index=True,
-                                height=min(300, 45 + 35 * max(1, len(_current_hdrs))),
+                                height=min(260, 45 + 35 * max(1, len(_current_hdrs))),
                             )
                             st.session_state[_hkey] = (
                                 _edited["欄位名稱"].dropna().astype(str)
@@ -803,6 +827,20 @@ with tab_main:
                             key=_tkey,
                             help="選擇填入此表格的原始資料工作表或檔案",
                         )
+
+            # 已移除的表格（點擊可加回）
+            if hidden_idxs:
+                st.markdown("**已移除的表格（點擊可加回）：**")
+                _hid_cols = st.columns(min(len(hidden_idxs), 4))
+                for ci, hi in enumerate(hidden_idxs):
+                    hi_title = st.session_state.get(
+                        f"table_title_{hi}",
+                        (w_titles[hi] if hi < len(w_titles) else "").strip() or f"表格 {hi+1}",
+                    )
+                    with _hid_cols[ci % len(_hid_cols)]:
+                        if st.button(f"＋ {hi_title}", key=f"add_tbl_{hi}"):
+                            st.session_state[_active_key].append(hi)
+                            st.rerun()
 
     st.divider()
 
@@ -839,7 +877,13 @@ with tab_main:
             all_matched_info = []
             total_rows_processed = 0
 
-            for i, (tbl_rt, wo) in enumerate(zip(w_tables_rt, word_options)):
+            _active_key = f"active_tables_{tmpl_file.name}"
+            _active_idxs = st.session_state.get(_active_key, list(range(len(w_tables_rt))))
+            for i in _active_idxs:
+                if i >= len(w_tables_rt):
+                    continue
+                wo = st.session_state.get(f"table_title_{i}", f"表格 {i+1}")
+                tbl_rt = w_tables_rt[i]
                 _tkey = f"table_source_{i}"
                 source_label = st.session_state.get(_tkey, "(不填寫)")
                 if source_label == "(不填寫)":
