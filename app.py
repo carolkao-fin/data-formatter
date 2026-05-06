@@ -764,23 +764,33 @@ with tab_main:
                     _auto = _auto_match(tbl_title)
                     st.session_state[_tkey] = _auto if _auto else "(不填寫)"
 
+                # 固定初始欄位（data_editor delta 的基準，不可被 rerun 覆寫）
+                _hkey_orig = f"table_headers_orig_{i}"
                 _hkey = f"table_headers_{i}"
-                if _hkey not in st.session_state:
-                    st.session_state[_hkey] = list(tbl[0]) if tbl else []
+                if _hkey_orig not in st.session_state:
+                    st.session_state[_hkey_orig] = list(tbl[0]) if tbl else []
+
+                # 目前有效欄位（每次 rerun 由 data_editor 回傳值更新）
+                _current_hdrs = st.session_state.get(_hkey, st.session_state[_hkey_orig])
+                _tbl_name = tbl_title or f"表格 {i+1}"
+                _cols_preview = " | ".join(str(h) for h in _current_hdrs[:5])
+                if len(_current_hdrs) > 5:
+                    _cols_preview += " | …"
+                _dynamic_wo = f"{_tbl_name}（{len(_current_hdrs)} 欄）：{_cols_preview}"
 
                 with st.container(border=True):
                     c_tbl, c_src = st.columns([4, 3])
                     with c_tbl:
-                        st.markdown(f"**{wo}**")
-                        with st.expander("欄位名稱（可新增／刪除）"):
-                            _hdr_df = pd.DataFrame({"欄位名稱": st.session_state[_hkey]})
+                        st.markdown(f"**{_dynamic_wo}**")
+                        with st.expander("欄位名稱（點選修改 / ＋ 新增列 / 🗑 刪除列）", expanded=True):
+                            _hdr_df = pd.DataFrame({"欄位名稱": st.session_state[_hkey_orig]})
                             _edited = st.data_editor(
                                 _hdr_df,
                                 num_rows="dynamic",
                                 use_container_width=True,
                                 key=f"hdr_editor_{i}",
                                 hide_index=True,
-                                height=min(260, 45 + 35 * max(1, len(st.session_state[_hkey]))),
+                                height=min(300, 45 + 35 * max(1, len(_current_hdrs))),
                             )
                             st.session_state[_hkey] = (
                                 _edited["欄位名稱"].dropna().astype(str)
@@ -845,9 +855,11 @@ with tab_main:
                     st.warning(f"⚠️ {wo}：讀取「{source_label}」失敗，跳過")
                     continue
 
-                first_tbl_headers = st.session_state.get(f"table_headers_{i}") or (
-                    [c.text.strip() for c in doc_obj.tables[i].rows[0].cells]
-                    if i < len(doc_obj.tables) else []
+                first_tbl_headers = (
+                    st.session_state.get(f"table_headers_{i}")
+                    or st.session_state.get(f"table_headers_orig_{i}")
+                    or ([c.text.strip() for c in doc_obj.tables[i].rows[0].cells]
+                        if i < len(doc_obj.tables) else [])
                 )
 
                 focused_target = {
