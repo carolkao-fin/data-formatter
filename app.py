@@ -544,15 +544,21 @@ def _fill_word_table(table, result_df: pd.DataFrame) -> None:
         if row_idx >= len(data_rows):
             break
         row_cells = data_rows[row_idx].cells
-        for j, df_col in col_map.items():
+        written_tcs: set[int] = set()
+        for j in sorted(col_map.keys()):
             if j >= len(row_cells):
                 continue
             cell = row_cells[j]
             if _is_vmerge_continuation(cell):
                 continue  # 垂直合併延續格，跳過
-            val = row_data.get(df_col, None)
-            if val is not None:
-                _set_cell_text(cell, _fmt_val(val))
+            tc_id = id(cell._tc)
+            if tc_id in written_tcs:
+                continue  # 水平合併延續格（hSpan），跳過
+            written_tcs.add(tc_id)
+            val = row_data.get(col_map[j], None)
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                continue  # 保留 template 現有內容
+            _set_cell_text(cell, _fmt_val(val))
 
 
 def generate_word(result_df: pd.DataFrame,
