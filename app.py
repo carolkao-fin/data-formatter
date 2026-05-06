@@ -449,33 +449,110 @@ def generate_excel(result_df: pd.DataFrame) -> bytes:
         result_df.to_excel(writer, index=False, sheet_name="整理結果")
     return buf.getvalue()
 
-def _fill_word_table(table, result_df: pd.DataFrame) -> None:
-    """將 result_df 的資料列填入 Word table（清除舊資料列後重新寫入）"""
+def _fmt_val(val) -> str:
+    """格式化輸出值：整數不顯示 .0，小數最多保留 4 位並去掉尾零。"""
+    if pd.isna(val):
+        return ""
+    try:
+        f = float(val)
+        if f == int(f) and abs(f) < 1e15:
+            return str(int(f))
+        return f"{f:.4f}".rstrip("0").rstrip(".")
+    except (ValueError, TypeError, OverflowError):
+        return str(val)
+
+
+def _is_vmerge_continuation(cell) -> bool:
+    """判斷此 cell 是否為垂直合併的延續格（不含實際資料，不應覆寫）。"""
+    from docx.oxml.ns import qn
+    tcPr = cell._tc.find(qn("w:tcPr"))
+    if tcPr is None:
+        return False
+    vMerge = tcPr.find(qn("w:vMerge"))
+    if vMerge is None:
+        return False
+    return vMerge.get(qn("w:val")) != "restart"
+
+
+def _set_cell_text(cell, text: str) -> None:
+    """原地更新 cell 的第一個文字節點，不破壞 XML 結構與格式。"""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
-    import copy
+    tc = cell._tc
+    all_t = list(tc.iter(qn("w:t")))
+    if all_t:
+        all_t[0].text = text
+        for t in all_t[1:]:
+            t.text = ""
+    else:
+        p = OxmlElement("w:p")
+        r_el = OxmlElement("w:r")
+        t_el = OxmlElement("w:t")
+        t_el.text = text
+        r_el.append(t_el)
+        p.append(r_el)
+        tc.append(p)
 
-    header_cells = [cell.text.strip() for cell in table.rows[0].cells]
-    while len(table.rows) > 1:
-        table._tbl.remove(table.rows[-1]._tr)
 
-    for _, row_data in result_df.iterrows():
-        new_tr = copy.deepcopy(table.rows[0]._tr)
-        new_row_cells = new_tr.findall(qn("w:tc"))
-        for j, header in enumerate(header_cells):
-            if j < len(new_row_cells):
-                tc = new_row_cells[j]
-                for p in tc.findall(qn("w:p")):
-                    tc.remove(p)
-                p_elem = OxmlElement("w:p")
-                r_elem = OxmlElement("w:r")
-                t_elem = OxmlElement("w:t")
-                val = row_data.get(header, "")
-                t_elem.text = "" if pd.isna(val) else str(val)
-                r_elem.append(t_elem)
-                p_elem.append(r_elem)
-                tc.append(p_elem)
-        table._tbl.append(new_tr)
+def _replace_text_in_cell(cell, old: str, new: str) -> None:
+    """在 cell 的所有文字節點中做字串替換，保留 XML 結構與格式。"""
+    from docx.oxml.ns import qn
+    for t_elem in cell._tc.iter(qn("w:t")):
+        if old in (t_elem.text or ""):
+            t_elem.text = t_elem.text.replace(old, new)
+
+
+def _fill_word_table(table, result_df: pd.DataFrame) -> None:
+    """
+    將 result_df 的資料列填入 Word table。
+
+    若表格已有資料列（template 有原始資料），採「原地填入」模式：
+    - 保留所有現有列的結構（合併儲存格、標籤列、格式）
+    - 只更新與 result_df 欄位名稱對應的 cell
+    - 跳過垂直合併的延續格（vMerge continuation）
+
+    若表格無資料列，退回新增列模式（自訂表格或空白模板）。
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    if not table.rows:
+        return
+
+    # 從 header 列建立「欄位索引 → result_df 欄名」對應
+    col_map: dict[int, str] = {}
+    seen: set[str] = set()
+    for j, cell in enumerate(table.rows[0].cells):
+        txt = cell.text.strip()
+        if txt and txt in result_df.columns and txt not in seen:
+            col_map[j] = txt
+            seen.add(txt)
+
+    data_rows = table.rows[1:]
+
+    if not data_rows:
+        # 無現有資料列：直接新增（空白或自訂表格的 fallback）
+        for _, row_data in result_df.iterrows():
+            row = table.add_row()
+            for j, df_col in col_map.items():
+                if j < len(row.cells):
+                    _set_cell_text(row.cells[j], _fmt_val(row_data.get(df_col, "")))
+        return
+
+    # 原地填入：按列位置對應 result_df
+    for row_idx, (_, row_data) in enumerate(result_df.iterrows()):
+        if row_idx >= len(data_rows):
+            break
+        row_cells = data_rows[row_idx].cells
+        for j, df_col in col_map.items():
+            if j >= len(row_cells):
+                continue
+            cell = row_cells[j]
+            if _is_vmerge_continuation(cell):
+                continue  # 垂直合併延續格，跳過
+            val = row_data.get(df_col, None)
+            if val is not None:
+                _set_cell_text(cell, _fmt_val(val))
 
 
 def generate_word(result_df: pd.DataFrame,
@@ -1091,7 +1168,7 @@ with tab_main:
                     result_df.columns = [c.replace(_tgt_country, _raw_country) for c in result_df.columns]
                     if i < len(doc_obj.tables):
                         for _cell in doc_obj.tables[i].rows[0].cells:
-                            _cell.text = _cell.text.replace(_tgt_country, _raw_country)
+                            _replace_text_in_cell(_cell, _tgt_country, _raw_country)
 
                 if i < len(doc_obj.tables):
                     _fill_word_table(doc_obj.tables[i], result_df)
@@ -1627,7 +1704,7 @@ with tab_batch:
                                 result_df.columns = [c.replace(_b_tgt_country, _b_raw_country) for c in result_df.columns]
                                 if ti < len(g_doc.tables):
                                     for _cell in g_doc.tables[ti].rows[0].cells:
-                                        _cell.text = _cell.text.replace(_b_tgt_country, _b_raw_country)
+                                        _replace_text_in_cell(_cell, _b_tgt_country, _b_raw_country)
 
                             if ti < len(g_doc.tables):
                                 _fill_word_table(g_doc.tables[ti], result_df)
