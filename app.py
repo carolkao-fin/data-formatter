@@ -764,20 +764,27 @@ with tab_main:
                     _auto = _auto_match(tbl_title)
                     st.session_state[_tkey] = _auto if _auto else "(不填寫)"
 
+                _hkey = f"table_headers_{i}"
+                if _hkey not in st.session_state:
+                    st.session_state[_hkey] = list(tbl[0]) if tbl else []
+
                 with st.container(border=True):
                     c_tbl, c_src = st.columns([4, 3])
                     with c_tbl:
                         st.markdown(f"**{wo}**")
-                        if tbl and len(tbl) > 1:
-                            _hdr = tbl[0]
-                            _rows = [
-                                (r + [""] * len(_hdr))[:len(_hdr)]
-                                for r in tbl[1:3]
-                            ]
-                            st.dataframe(
-                                pd.DataFrame(_rows, columns=_hdr),
+                        with st.expander("欄位名稱（可新增／刪除）"):
+                            _hdr_df = pd.DataFrame({"欄位名稱": st.session_state[_hkey]})
+                            _edited = st.data_editor(
+                                _hdr_df,
+                                num_rows="dynamic",
                                 use_container_width=True,
-                                height=100,
+                                key=f"hdr_editor_{i}",
+                                hide_index=True,
+                                height=min(260, 45 + 35 * max(1, len(st.session_state[_hkey]))),
+                            )
+                            st.session_state[_hkey] = (
+                                _edited["欄位名稱"].dropna().astype(str)
+                                .loc[lambda s: s.str.strip() != ""].tolist()
                             )
                     with c_src:
                         st.selectbox(
@@ -838,9 +845,10 @@ with tab_main:
                     st.warning(f"⚠️ {wo}：讀取「{source_label}」失敗，跳過")
                     continue
 
-                first_tbl_headers = [
-                    c.text.strip() for c in doc_obj.tables[i].rows[0].cells
-                ] if i < len(doc_obj.tables) else []
+                first_tbl_headers = st.session_state.get(f"table_headers_{i}") or (
+                    [c.text.strip() for c in doc_obj.tables[i].rows[0].cells]
+                    if i < len(doc_obj.tables) else []
+                )
 
                 focused_target = {
                     "type": "excel",
