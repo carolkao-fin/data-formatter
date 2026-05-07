@@ -256,6 +256,16 @@ def _infer_country_from_cols(cols) -> str | None:
     return None
 
 
+def _infer_suffix(cols) -> str | None:
+    """從欄位名稱清單推斷末尾的國家代碼後綴，如 (w), (t)。"""
+    import re
+    for col in cols:
+        m = re.search(r'\(([a-zA-Z])\)$', str(col))
+        if m:
+            return f'({m.group(1)})'
+    return None
+
+
 def _filter_raw_by_keywords(raw_df: pd.DataFrame, target_cols: list[str]) -> pd.DataFrame:
     """
     Filter raw_df to only columns whose names share at least one keyword
@@ -1210,14 +1220,21 @@ with tab_main:
                 result_df = apply_mapping_to_df(g_raw_df, first_tbl_headers, mapping)
                 result_df = _fallback_fill_empty(result_df, g_raw_df)
 
-                # 若原始資料國家與目標欄位國家不同，自動替換欄位名稱與 Word 標題列
+                # 若原始資料國家 / 後綴與目標欄位不同，自動替換欄位名稱與 Word 標題列
                 _raw_country = _infer_country_from_cols(list(g_raw_df.columns))
                 _tgt_country = _infer_country_from_cols(first_tbl_headers)
+                _raw_suffix  = _infer_suffix(list(g_raw_df.columns))
+                _tgt_suffix  = _infer_suffix(first_tbl_headers)
                 if _raw_country and _tgt_country and _raw_country != _tgt_country:
                     result_df.columns = [c.replace(_tgt_country, _raw_country) for c in result_df.columns]
                     if i < len(doc_obj.tables):
                         for _cell in doc_obj.tables[i].rows[0].cells:
                             _replace_text_in_cell(_cell, _tgt_country, _raw_country)
+                if _raw_suffix and _tgt_suffix and _raw_suffix != _tgt_suffix:
+                    result_df.columns = [c.replace(_tgt_suffix, _raw_suffix) for c in result_df.columns]
+                    if i < len(doc_obj.tables):
+                        for _cell in doc_obj.tables[i].rows[0].cells:
+                            _replace_text_in_cell(_cell, _tgt_suffix, _raw_suffix)
 
                 if i < len(doc_obj.tables):
                     _fill_word_table(doc_obj.tables[i], result_df)
@@ -1751,11 +1768,18 @@ with tab_batch:
 
                             _b_raw_country = _infer_country_from_cols(list(g_item_df.columns))
                             _b_tgt_country = _infer_country_from_cols(_b_hdrs)
+                            _b_raw_suffix  = _infer_suffix(list(g_item_df.columns))
+                            _b_tgt_suffix  = _infer_suffix(_b_hdrs)
                             if _b_raw_country and _b_tgt_country and _b_raw_country != _b_tgt_country:
                                 result_df.columns = [c.replace(_b_tgt_country, _b_raw_country) for c in result_df.columns]
                                 if ti < len(g_doc.tables):
                                     for _cell in g_doc.tables[ti].rows[0].cells:
                                         _replace_text_in_cell(_cell, _b_tgt_country, _b_raw_country)
+                            if _b_raw_suffix and _b_tgt_suffix and _b_raw_suffix != _b_tgt_suffix:
+                                result_df.columns = [c.replace(_b_tgt_suffix, _b_raw_suffix) for c in result_df.columns]
+                                if ti < len(g_doc.tables):
+                                    for _cell in g_doc.tables[ti].rows[0].cells:
+                                        _replace_text_in_cell(_cell, _b_tgt_suffix, _b_raw_suffix)
 
                             if ti < len(g_doc.tables):
                                 _fill_word_table(g_doc.tables[ti], result_df)
