@@ -444,27 +444,37 @@ def apply_mapping_to_df(raw_df: pd.DataFrame,
     return result
 
 
+def _normalize_col(s: str) -> str:
+    """去除欄位名稱中的國家名稱，並移除末尾的單字母國家代碼後綴（如 (w), (t)）。
+    用於跨國、跨後綴的欄位比對（例如法國(t) ↔ 日本(w) 的同義欄位）。
+    """
+    import re
+    s = _strip_country(str(s))
+    s = re.sub(r'\([a-zA-Z]\)$', '', s)
+    return s
+
+
 def _fallback_fill_empty(result_df: pd.DataFrame, raw_df: pd.DataFrame) -> pd.DataFrame:
     """
-    For all-empty columns in result_df, try country-stripped name matching against raw_df.
-    Handles cases like '美國自世界' ↔ '英國自世界' where AI fails to match due to country name.
-    Only activates when _strip_country actually changed the column name.
+    For all-empty columns in result_df, try normalized name matching against raw_df.
+    Handles country name mismatch (美國↔英國) AND country-code suffix mismatch ((w)↔(t)).
+    Only activates when normalization actually changed the column name.
     """
     result_df = result_df.copy()
-    raw_stripped_map: dict[str, str] = {}
+    raw_norm_map: dict[str, str] = {}
     for rc in raw_df.columns:
-        rs = _strip_country(str(rc))
-        if rs not in raw_stripped_map:
-            raw_stripped_map[rs] = str(rc)
+        rn = _normalize_col(str(rc))
+        if rn not in raw_norm_map:
+            raw_norm_map[rn] = str(rc)
 
     for col in result_df.columns:
         if not result_df[col].isna().all():
             continue
         col_str = str(col)
-        col_stripped = _strip_country(col_str)
-        if col_stripped == col_str:
-            continue  # no country name to strip, skip
-        matched_raw = raw_stripped_map.get(col_stripped)
+        col_norm = _normalize_col(col_str)
+        if col_norm == col_str:
+            continue  # nothing was normalized, skip
+        matched_raw = raw_norm_map.get(col_norm)
         if matched_raw and matched_raw in raw_df.columns:
             result_df[col] = raw_df[matched_raw].values
     return result_df
