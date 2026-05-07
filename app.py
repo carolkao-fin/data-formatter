@@ -4,7 +4,9 @@ import io
 import json
 import os
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+TW_TZ = timezone(timedelta(hours=8))
 
 from groq import Groq
 import pandas as pd
@@ -657,7 +659,7 @@ def run_conversion(client: Groq,
     result_df = apply_mapping_to_df(raw_df, target_cols, mapping)
     result_df = _fallback_fill_empty(result_df, raw_df)
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(TW_TZ).strftime("%Y%m%d_%H%M%S")
     prefix = raw_name.rsplit(".", 1)[0] if raw_name else "result"
 
     if target_type == "word":
@@ -1128,7 +1130,7 @@ with tab_main:
         key="run_btn",
     ):
         client = _make_client(api_key)
-        now = datetime.now()
+        now = datetime.now(TW_TZ)
         ts = now.strftime("%Y%m%d_%H%M%S")
         raw_names_str = ", ".join(f.name for f in raw_files)
 
@@ -1652,7 +1654,7 @@ with tab_batch:
     ):
         client = _make_client(api_key)
         batch_results = []
-        now = datetime.now()
+        now = datetime.now(TW_TZ)
         ts = now.strftime("%Y%m%d_%H%M%S")
 
         progress = st.progress(0, text="準備中…")
@@ -1936,7 +1938,7 @@ with tab_history:
             st.download_button(
                 "⬇️ 匯出歷史 (JSON)",
                 data=json.dumps(history, ensure_ascii=False, indent=2).encode("utf-8"),
-                file_name=f"history_{datetime.now().strftime('%Y%m%d')}.json",
+                file_name=f"history_{datetime.now(TW_TZ).strftime('%Y%m%d')}.json",
                 mime="application/json",
             )
         with col_clr:
