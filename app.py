@@ -524,11 +524,19 @@ def _set_cell_text(cell, text: str) -> None:
 
 
 def _replace_text_in_cell(cell, old: str, new: str) -> None:
-    """在 cell 的所有文字節點中做字串替換，保留 XML 結構與格式。"""
+    """在 cell 的所有文字節點中做字串替換。
+    逐段落聚合所有 w:t 後再替換，避免文字跨 run 拆分導致找不到目標字串。
+    """
     from docx.oxml.ns import qn
-    for t_elem in cell._tc.iter(qn("w:t")):
-        if old in (t_elem.text or ""):
-            t_elem.text = t_elem.text.replace(old, new)
+    for para in cell._tc.iter(qn("w:p")):
+        t_nodes = list(para.iter(qn("w:t")))
+        if not t_nodes:
+            continue
+        full = "".join(t.text or "" for t in t_nodes)
+        if old in full:
+            t_nodes[0].text = full.replace(old, new)
+            for t in t_nodes[1:]:
+                t.text = ""
 
 
 def _fill_word_table(table, result_df: pd.DataFrame) -> None:
