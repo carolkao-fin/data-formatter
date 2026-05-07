@@ -1315,19 +1315,19 @@ with tab_main:
                 data=out_bytes, file_name=out_name, mime=mime,
                 use_container_width=True, type="primary",
             )
-            for info in all_matched_info:
-                append_log({
-                    "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "date": now.strftime("%Y-%m-%d"),
-                    "time": now.strftime("%H:%M:%S"),
-                    "raw_file": info["file"],
-                    "template_file": tmpl_file.name,
-                    "output_file": out_name,
-                    "output_type": "word",
-                    "rows": len(info["result_df"]),
-                    "mapped": info["matched"],
-                    "total_cols": len(info["target_cols"]),
-                })
+            _all_sources = list(dict.fromkeys(info["file"] for info in all_matched_info))
+            append_log({
+                "ts":            now.strftime("%Y-%m-%d %H:%M:%S"),
+                "date":          now.strftime("%Y-%m-%d"),
+                "time":          now.strftime("%H:%M:%S"),
+                "raw_file":      ", ".join(_all_sources),
+                "template_file": tmpl_file.name,
+                "output_file":   out_name,
+                "output_type":   "word",
+                "rows":          total_rows_processed,
+                "mapped":        sum(info["matched"] for info in all_matched_info),
+                "total_cols":    sum(len(info["target_cols"]) for info in all_matched_info),
+            })
             st.success(f"✅ 完成！共 {len(all_matched_info)} 個檔案，合計 {total_rows_processed:,} 筆")
 
         # ── Excel 或單純 Word 無選擇器：合併所有檔案後一次處理 ────────────────
