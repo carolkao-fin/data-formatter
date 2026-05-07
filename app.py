@@ -441,6 +441,33 @@ def apply_mapping_to_df(raw_df: pd.DataFrame,
 
     return result
 
+
+def _fallback_fill_empty(result_df: pd.DataFrame, raw_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For all-empty columns in result_df, try country-stripped name matching against raw_df.
+    Handles cases like '美國自世界' ↔ '英國自世界' where AI fails to match due to country name.
+    Only activates when _strip_country actually changed the column name.
+    """
+    result_df = result_df.copy()
+    raw_stripped_map: dict[str, str] = {}
+    for rc in raw_df.columns:
+        rs = _strip_country(str(rc))
+        if rs not in raw_stripped_map:
+            raw_stripped_map[rs] = str(rc)
+
+    for col in result_df.columns:
+        if not result_df[col].isna().all():
+            continue
+        col_str = str(col)
+        col_stripped = _strip_country(col_str)
+        if col_stripped == col_str:
+            continue  # no country name to strip, skip
+        matched_raw = raw_stripped_map.get(col_stripped)
+        if matched_raw and matched_raw in raw_df.columns:
+            result_df[col] = raw_df[matched_raw].values
+    return result_df
+
+
 # ── Output generators ──────────────────────────────────────────────────────────
 
 def generate_excel(result_df: pd.DataFrame) -> bytes:
@@ -628,6 +655,7 @@ def run_conversion(client: Groq,
     mapping = get_mapping(client, raw_df, target)
 
     result_df = apply_mapping_to_df(raw_df, target_cols, mapping)
+    result_df = _fallback_fill_empty(result_df, raw_df)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = raw_name.rsplit(".", 1)[0] if raw_name else "result"
@@ -1160,6 +1188,7 @@ with tab_main:
                         continue
 
                 result_df = apply_mapping_to_df(g_raw_df, first_tbl_headers, mapping)
+                result_df = _fallback_fill_empty(result_df, g_raw_df)
 
                 # 若原始資料國家與目標欄位國家不同，自動替換欄位名稱與 Word 標題列
                 _raw_country = _infer_country_from_cols(list(g_raw_df.columns))
@@ -1215,6 +1244,7 @@ with tab_main:
                         st.error(f"自訂表格「{ctbl['name']}」：AI 分析失敗（{e}），跳過")
                         continue
                 result_df = apply_mapping_to_df(g_raw_df, _custom_hdrs, mapping)
+                result_df = _fallback_fill_empty(result_df, g_raw_df)
                 new_tbl = doc_obj.add_table(rows=1, cols=len(_custom_hdrs))
                 new_tbl.style = "Table Grid"
                 for j, h in enumerate(_custom_hdrs):
@@ -1697,6 +1727,7 @@ with tab_batch:
                                     st.error(f"{_bwo}：AI 失敗（{e}），跳過")
                                     continue
                             result_df = apply_mapping_to_df(g_item_df, _b_hdrs, mapping)
+                            result_df = _fallback_fill_empty(result_df, g_item_df)
 
                             _b_raw_country = _infer_country_from_cols(list(g_item_df.columns))
                             _b_tgt_country = _infer_country_from_cols(_b_hdrs)
@@ -1742,6 +1773,7 @@ with tab_batch:
                                     st.error(f"自訂表格「{ctbl['name']}」：AI 失敗（{e}），跳過")
                                     continue
                             c_result = apply_mapping_to_df(g_cdf, _c_hdrs, c_mapping)
+                            c_result = _fallback_fill_empty(c_result, g_cdf)
                             c_tbl = g_doc.add_table(rows=1, cols=len(_c_hdrs))
                             c_tbl.style = "Table Grid"
                             for j, h in enumerate(_c_hdrs):
