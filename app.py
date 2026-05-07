@@ -864,7 +864,7 @@ with tab_main:
                             help="可選多個工作表；Word 輸出時每個工作表各自 AI 映射並填入對應表格；Excel 輸出使用第一個選取的工作表",
                         )
                         _active = _sel_sheets if _sel_sheets else _rs[:1]
-                        _data_items = [{"file": rf0, "sheet": sn, "label": sn} for sn in _active]
+                        _data_items = [{"file": rf0, "sheet": sn, "label": f"{rf0.name}／{sn}"} for sn in _active]
                         _raw_sheet = _active[0]
                     else:
                         _data_items = [{"file": rf0, "sheet": None, "label": rf0.name}]
